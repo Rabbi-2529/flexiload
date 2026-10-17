@@ -1,0 +1,45 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Send Top-up | Flexiload Control{% endblock %}
+{% block heading %}Send mobile top-up{% endblock %}
+{% block content %}
+  <div class="mode-banner {% if modem_backend == 'serial' %}live{% else %}mock{% endif %}">
+    <strong>{{ modem_backend|upper }} MODE.</strong>
+    {% if modem_backend == "serial" %}The selected modem will dial real USSD.{% else %}This request will not reach a mobile network.{% endif %}
+  </div>
+  <div class="two-column">
+    <section class="panel">
+      <h2>Top-up details</h2>
+      <form method="post" class="stack-form" id="topup-form">
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="field-error">{{ form.non_field_errors }}</div>{% endif %}
+        <label for="{{ form.sim_profile.id_for_label }}">Verified source SIM</label>
+        {{ form.sim_profile }}
+        {{ form.sim_profile.errors }}
+        <label for="{{ form.product.id_for_label }}">Product</label>
+        {{ form.product }}
+        {{ form.product.errors }}
+        <label for="{{ form.phone_number.id_for_label }}">Destination mobile number</label>
+        {{ form.phone_number }}
+        {{ form.phone_number.errors }}
+        <label for="{{ form.amount.id_for_label }}">Amount (BDT)</label>
+        {{ form.amount }}
+        {{ form.amount.errors }}
+        <label for="{{ form.pin.id_for_label }}">PIN override (optional)</label>
+        {{ form.pin }}
+        {{ form.pin.errors }}
+        <label class="checkbox-row">{{ form.confirm }} <span>{{ form.confirm.label }}</span></label>
+        {{ form.confirm.errors }}
+        <button class="btn primary danger-action" type="submit">Verify SIM and dial USSD</button>
+      </form>
+    </section>
+    <aside class="panel help-panel">
+      <h2>Before sending</h2>
+      <ol>
+        <li>The source SIM number is rechecked on its COM port.</li>
+        <li>The encrypted PIN is inserted into the operator command.</li>
+        <li>The complete modem reply is stored with the transaction.</li>
+      </ol>
+      <p class="muted">A profile appears here only after its own-number USSD check succeeds.</p>
+    </aside>
+  </div>
+{% endblock %}

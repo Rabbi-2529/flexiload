@@ -1,0 +1,471 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Transactions | Flexiload Control{% endblock %}
+{% block heading %}Transaction history{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="txn-date-bar">
+    <div class="quick-ranges" id="quick-ranges">
+      <button type="button" class="btn small" data-range="today">Today</button>
+      <button type="button" class="btn small" data-range="yesterday">Yesterday</button>
+      <button type="button" class="btn small" data-range="7">Last 7 days</button>
+      <button type="button" class="btn small" data-range="30">Last 30 days</button>
+      <button type="button" class="btn small" data-range="month">This month</button>
+      <button type="button" class="btn small" data-range="all">All</button>
+    </div>
+    <label>From <input type="date" id="date-from"></label>
+    <label>To <input type="date" id="date-to"></label>
+  </div>
+
+  <div class="data-toolbar">
+    <label>
+      Show
+      <select id="page-size">
+        <option value="10">10</option>
+        <option value="25" selected>25</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+      </select>
+      entries
+    </label>
+
+    <select id="status-filter">
+      <option value="">All statuses</option>
+      {% for value, label in status_choices %}
+        <option value="{{ value }}">{{ label }}</option>
+      {% endfor %}
+    </select>
+
+    <select id="operator-filter">
+      <option value="">All operators</option>
+      <option value="grameenphone">Grameenphone</option>
+      <option value="robi">Robi</option>
+      <option value="airtel">Airtel</option>
+      <option value="banglalink">Banglalink</option>
+    </select>
+
+    <input
+      id="table-search"
+      type="search"
+      placeholder="Search all transactions"
+    >
+  </div>
+
+  <div class="table-wrap">
+    <table id="transactions-table" class="data-table">
+      <thead>
+        <tr>
+          <th data-column="0">Created <span class="sort-mark"></span></th>
+          <th data-column="1">ID <span class="sort-mark"></span></th>
+          <th data-column="2">Source SIM <span class="sort-mark"></span></th>
+          <th data-column="3">Destination <span class="sort-mark"></span></th>
+          <th data-column="4">Operator <span class="sort-mark"></span></th>
+          <th data-column="5">Product <span class="sort-mark"></span></th>
+          <th data-column="6">Amount <span class="sort-mark"></span></th>
+          <th data-column="7">Status <span class="sort-mark"></span></th>
+        </tr>
+      </thead>
+
+      <tbody>
+        {% for item in transactions %}
+          <tr
+            data-status="{{ item.status }}"
+            data-operator="{{ item.operator }}"
+            data-date="{{ item.created_at|date:'Y-m-d' }}"
+          >
+            <td data-sort="{{ item.created_at|date:'YmdHis' }}">
+              {{ item.created_at|date:"Y-m-d H:i:s" }}
+            </td>
+
+            <td>
+              <a href="{% url 'dashboard:transaction_detail' item.pk %}">
+                {{ item.pk|stringformat:"s"|slice:":8" }}
+              </a>
+            </td>
+
+            <td>
+              {{ item.sim_profile.sim_number|default:item.sim_profile.name }}
+            </td>
+
+            <td>{{ item.phone_number }}</td>
+            <td>{{ item.get_operator_display }}</td>
+            <td>{{ item.get_product_display }}</td>
+
+            <td data-sort="{{ item.amount }}">
+              BDT {{ item.amount }}
+            </td>
+
+            <td>
+              <span class="badge {{ item.status }}">
+                {{ item.get_status_display }}
+              </span>
+            </td>
+          </tr>
+        {% empty %}
+          <tr class="source-empty">
+            <td colspan="8" class="empty">No transactions yet.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="txn-totals" id="txn-totals">
+    <div class="txn-total-card">
+      <span>Transactions (filtered)</span>
+      <strong id="total-count">0</strong>
+    </div>
+    <div class="txn-total-card">
+      <span>Total amount</span>
+      <strong id="total-amount">৳ 0</strong>
+    </div>
+    <div class="txn-total-card">
+      <span>Successful</span>
+      <strong id="success-count">0</strong>
+    </div>
+    <div class="txn-total-card">
+      <span>Successful amount</span>
+      <strong id="success-amount" style="color:var(--green)">৳ 0</strong>
+    </div>
+  </div>
+
+  <div class="data-footer">
+    <span id="table-info">Showing 0 entries</span>
+    <div class="pagination" id="table-pagination"></div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/flatpickr/4.6.13/flatpickr.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/flatpickr/4.6.13/flatpickr.min.js"></script>
+<script>
+  (function () {
+    const table = document.getElementById("transactions-table");
+    const sourceRows = Array.from(
+      table.querySelectorAll("tbody tr:not(.source-empty)")
+    );
+
+    const search = document.getElementById("table-search");
+    const status = document.getElementById("status-filter");
+    const operator = document.getElementById("operator-filter");
+    const dateFrom = document.getElementById("date-from");
+    const dateTo = document.getElementById("date-to");
+    const quickRanges = document.getElementById("quick-ranges");
+    const pageSize = document.getElementById("page-size");
+    const info = document.getElementById("table-info");
+    const pagination = document.getElementById("table-pagination");
+
+    let currentPage = 1;
+    let sortColumn = 0;
+    let sortDirection = "desc";
+
+    function cellValue(row, column) {
+      const cell = row.cells[column];
+
+      return (
+        cell.dataset.sort || cell.textContent
+      ).trim().toLowerCase();
+    }
+
+    function filteredRows() {
+      const query = search.value.trim().toLowerCase();
+
+      return sourceRows
+        .filter(function (row) {
+          const statusMatches =
+            !status.value ||
+            row.dataset.status === status.value;
+
+          const operatorMatches =
+            !operator.value ||
+            row.dataset.operator === operator.value;
+
+          const searchMatches =
+            !query ||
+            row.textContent.toLowerCase().includes(query);
+
+          const rowDate = row.dataset.date || "";
+          const fromMatches = !dateFrom.value || rowDate >= dateFrom.value;
+          const toMatches = !dateTo.value || rowDate <= dateTo.value;
+
+          return (
+            statusMatches &&
+            operatorMatches &&
+            searchMatches &&
+            fromMatches &&
+            toMatches
+          );
+        })
+        .sort(function (a, b) {
+          const left = cellValue(a, sortColumn);
+          const right = cellValue(b, sortColumn);
+
+          const result = left.localeCompare(
+            right,
+            undefined,
+            { numeric: true }
+          );
+
+          return sortDirection === "asc" ? result : -result;
+        });
+    }
+
+    function pageButton(label, page, disabled, active) {
+      const button = document.createElement("button");
+
+      button.type = "button";
+      button.textContent = label;
+      button.className =
+        "btn small" + (active ? " primary" : "");
+      button.disabled = disabled;
+
+      button.addEventListener("click", function () {
+        currentPage = page;
+        render();
+      });
+
+      return button;
+    }
+
+    const totalCountEl = document.getElementById("total-count");
+    const totalAmountEl = document.getElementById("total-amount");
+    const successCountEl = document.getElementById("success-count");
+    const successAmountEl = document.getElementById("success-amount");
+
+    function money(value) {
+      return "৳ " + value.toLocaleString("en-US");
+    }
+
+    function updateTotals(rows) {
+      let totalAmount = 0;
+      let successAmount = 0;
+      let successCount = 0;
+      rows.forEach(function (row) {
+        const amount = Number(row.cells[6].dataset.sort) || 0;
+        totalAmount += amount;
+        if (row.dataset.status === "success") {
+          successAmount += amount;
+          successCount += 1;
+        }
+      });
+      if (totalCountEl) totalCountEl.textContent = rows.length.toLocaleString("en-US");
+      if (totalAmountEl) totalAmountEl.textContent = money(totalAmount);
+      if (successCountEl) successCountEl.textContent = successCount.toLocaleString("en-US");
+      if (successAmountEl) successAmountEl.textContent = money(successAmount);
+    }
+
+    function render() {
+      const rows = filteredRows();
+      updateTotals(rows);
+      const size = Number(pageSize.value);
+      const pages = Math.max(1, Math.ceil(rows.length / size));
+
+      currentPage = Math.min(currentPage, pages);
+
+      const start = (currentPage - 1) * size;
+      const visibleRows = rows.slice(start, start + size);
+
+      sourceRows.forEach(function (row) {
+        row.hidden = true;
+      });
+
+      visibleRows.forEach(function (row) {
+        row.hidden = false;
+        table.tBodies[0].appendChild(row);
+      });
+
+      if (rows.length) {
+        info.textContent =
+          "Showing " +
+          (start + 1) +
+          " to " +
+          Math.min(start + size, rows.length) +
+          " of " +
+          rows.length +
+          " entries";
+      } else {
+        info.textContent = "Showing 0 entries";
+      }
+
+      pagination.replaceChildren();
+
+      pagination.appendChild(
+        pageButton(
+          "Previous",
+          currentPage - 1,
+          currentPage === 1,
+          false
+        )
+      );
+
+      for (let page = 1; page <= pages; page += 1) {
+        if (
+          pages <= 7 ||
+          page === 1 ||
+          page === pages ||
+          Math.abs(page - currentPage) <= 1
+        ) {
+          pagination.appendChild(
+            pageButton(
+              String(page),
+              page,
+              false,
+              page === currentPage
+            )
+          );
+        }
+      }
+
+      pagination.appendChild(
+        pageButton(
+          "Next",
+          currentPage + 1,
+          currentPage === pages,
+          false
+        )
+      );
+
+      table.querySelectorAll("th").forEach(function (header) {
+        const headerColumn = Number(header.dataset.column);
+        const isSorted = headerColumn === sortColumn;
+        const mark = header.querySelector(".sort-mark");
+
+        header.classList.toggle("sorted", isSorted);
+
+        if (mark) {
+          mark.textContent = isSorted
+            ? (sortDirection === "asc" ? " ^" : " v")
+            : "";
+        }
+      });
+    }
+
+    search.addEventListener("input", function () {
+      currentPage = 1;
+      render();
+    });
+
+    status.addEventListener("change", function () {
+      currentPage = 1;
+      render();
+    });
+
+    operator.addEventListener("change", function () {
+      currentPage = 1;
+      render();
+    });
+
+    function fmtDate(d) {
+      return d.getFullYear() + "-"
+        + String(d.getMonth() + 1).padStart(2, "0") + "-"
+        + String(d.getDate()).padStart(2, "0");
+    }
+
+    let fpFrom = null;
+    let fpTo = null;
+
+    function setDateValue(instance, input, value) {
+      if (instance) {
+        instance.setDate(value || null, false);
+      }
+      input.value = value || "";
+    }
+
+    function onDateChanged() {
+      // Keep From <= To.
+      if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+        setDateValue(fpTo, dateTo, dateFrom.value);
+      }
+      currentPage = 1;
+      render();
+    }
+
+    // Professional calendar (flatpickr) when available; falls back to the
+    // native date box if the library did not load.
+    if (window.flatpickr) {
+      const options = {
+        dateFormat: "Y-m-d",
+        altInput: true,
+        altFormat: "d M Y",
+        allowInput: true,
+        onChange: function () { onDateChanged(); }
+      };
+      fpFrom = window.flatpickr(dateFrom, options);
+      fpTo = window.flatpickr(dateTo, options);
+    } else {
+      dateFrom.addEventListener("change", onDateChanged);
+      dateTo.addEventListener("change", onDateChanged);
+    }
+
+    quickRanges.addEventListener("click", function (event) {
+      const button = event.target.closest("button[data-range]");
+      if (!button) {
+        return;
+      }
+      const range = button.dataset.range;
+      const now = new Date();
+      let from = new Date();
+      let to = new Date();
+      if (range === "today") {
+        // from and to are both today
+      } else if (range === "yesterday") {
+        from.setDate(now.getDate() - 1);
+        to.setDate(now.getDate() - 1);
+      } else if (range === "7") {
+        from.setDate(now.getDate() - 6);
+      } else if (range === "30") {
+        from.setDate(now.getDate() - 29);
+      } else if (range === "month") {
+        from = new Date(now.getFullYear(), now.getMonth(), 1);
+      } else if (range === "all") {
+        if (fpFrom) { fpFrom.clear(); } else { dateFrom.value = ""; }
+        if (fpTo) { fpTo.clear(); } else { dateTo.value = ""; }
+        currentPage = 1;
+        render();
+        return;
+      }
+      setDateValue(fpFrom, dateFrom, fmtDate(from));
+      setDateValue(fpTo, dateTo, fmtDate(to));
+      currentPage = 1;
+      render();
+    });
+
+    pageSize.addEventListener("change", function () {
+      currentPage = 1;
+      render();
+    });
+
+    table
+      .querySelectorAll("th[data-column]")
+      .forEach(function (header) {
+        header.addEventListener("click", function () {
+          const column = Number(header.dataset.column);
+
+          if (sortColumn === column) {
+            sortDirection =
+              sortDirection === "asc" ? "desc" : "asc";
+          } else {
+            sortColumn = column;
+            sortDirection = "asc";
+          }
+
+          render();
+        });
+      });
+
+    render();
+  }());
+</script>
+<style>
+  .txn-date-bar { display:flex; flex-wrap:wrap; align-items:end; gap:10px 14px; margin-bottom:14px; }
+  .txn-date-bar .quick-ranges { display:flex; flex-wrap:wrap; gap:8px; }
+  .txn-date-bar label { display:grid; gap:4px; font-size:12px; font-weight:700; color:var(--muted); }
+  .txn-date-bar input { min-height:38px; padding:7px 9px; border:1px solid #bcccdc; border-radius:6px; background:#fff; color:var(--text); font-weight:600; }
+  .txn-date-bar .flatpickr-input[readonly] { background:#fff; }
+  .txn-totals { display:flex; flex-wrap:wrap; gap:14px; margin-top:16px; }
+  .txn-total-card { flex:1 1 160px; min-width:150px; padding:14px 16px; border:1px solid var(--border); border-radius:9px; background:#f7fafc; }
+  .txn-total-card span { display:block; color:var(--muted); font-size:12px; }
+  .txn-total-card strong { display:block; margin-top:6px; color:var(--navy); font-size:22px; }
+</style>
+{% endblock %}

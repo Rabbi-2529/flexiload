@@ -1,0 +1,216 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Offer Check | Flexiload Control{% endblock %}
+{% block heading %}Offer check{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>Check offers for a number</h2>
+  <p class="muted" style="margin-top:-6px;">
+    Fetches available offers from the operator for this number and amount.
+    Pick an offer and press Buy to send it through the recharge queue.
+  </p>
+  <form method="post" class="offer-form">
+    {% csrf_token %}
+    <label>Operator
+      <select name="operator">
+        {% for value, label in operators %}
+          <option value="{{ value }}" {% if form.operator == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Mobile number
+      <input type="text" name="number" value="{{ form.number }}" placeholder="01XXXXXXXXX" inputmode="numeric">
+    </label>
+    <label>Amount
+      <input type="number" name="amount" value="{{ form.amount|default:'10' }}" min="1">
+    </label>
+    <div class="offer-form-action">
+      <button class="btn primary" type="submit">Check offers</button>
+    </div>
+  </form>
+  {% if error %}<div class="message error" style="margin-top:16px;">{{ error }}</div>{% endif %}
+</section>
+
+{% if result %}
+<section class="panel">
+  <div class="offer-topbar">
+    <div class="offer-stat"><span>Operator</span><strong>{{ form.operator|upper }}</strong></div>
+    <div class="offer-stat"><span>Number</span><strong>{{ form.number }}</strong></div>
+    <div class="offer-stat"><span>Total offers</span><strong>{{ result.counts.all }}</strong></div>
+  </div>
+
+  {% if result.offers %}
+    <div class="offer-filters" id="offer-filters">
+      {% for f in result.filters %}
+        <button type="button" class="btn small filter-btn {% if f.key == 'all' %}primary active{% endif %}" data-filter="{{ f.key }}">
+          {{ f.label }} ({{ f.count }})
+        </button>
+      {% endfor %}
+    </div>
+    <div class="muted" id="offer-filter-status" style="margin:6px 0 14px;">Showing all {{ result.counts.all }} offers</div>
+
+    <div class="offer-grid" id="offer-grid">
+      {% for offer in result.offers %}
+        <div class="offer-card offer-item"
+             data-all="yes"
+             data-30days="{% if offer.cat.30days %}yes{% else %}no{% endif %}"
+             data-7days="{% if offer.cat.7days %}yes{% else %}no{% endif %}"
+             data-data="{% if offer.cat.data %}yes{% else %}no{% endif %}"
+             data-minutes="{% if offer.cat.minutes %}yes{% else %}no{% endif %}"
+             data-combo="{% if offer.cat.combo %}yes{% else %}no{% endif %}"
+             data-social="{% if offer.cat.social %}yes{% else %}no{% endif %}"
+             data-streaming="{% if offer.cat.streaming %}yes{% else %}no{% endif %}"
+             data-unlimited="{% if offer.cat.unlimited %}yes{% else %}no{% endif %}">
+          <div class="offer-top">
+            <span class="offer-price">৳ {{ offer.amount }}</span>
+            {% if offer.highlighted %}<span class="offer-fire">🔥</span>{% endif %}
+          </div>
+          <div class="offer-summary">{{ offer.summary }}</div>
+          <div class="offer-meta">
+            <span class="offer-validity">{{ offer.validity }}</span>
+            {% if offer.type %}<span class="offer-type">{{ offer.type }}</span>{% endif %}
+          </div>
+          <button type="button" class="btn primary small offer-buy-btn"
+                  data-amount="{{ offer.amount }}"
+                  data-summary="{{ offer.summary }}"
+                  data-validity="{{ offer.validity }}"
+                  data-ussd="{{ offer.ussd }}"
+                  data-type="{{ offer.type }}">Buy now</button>
+        </div>
+      {% endfor %}
+    </div>
+  {% elif result.message %}
+    <div class="message">{{ result.message }}</div>
+  {% else %}
+    <div class="empty">No offers found for this number.</div>
+  {% endif %}
+</section>
+
+<!-- Buy modal -->
+<div id="offer-modal" class="offer-modal" hidden>
+  <div class="offer-modal-box">
+    <div class="offer-modal-head">
+      <strong id="m-summary">Offer</strong>
+      <button type="button" class="link-button" id="m-close" style="color:var(--muted);">&times; Close</button>
+    </div>
+    <div class="offer-modal-info">
+      <div><span class="muted">Price</span><div><strong id="m-price"></strong></div></div>
+      <div><span class="muted">Validity</span><div id="m-validity"></div></div>
+      <div><span class="muted">USSD</span><div id="m-ussd"></div></div>
+    </div>
+    <form method="post" action="{% url 'dashboard:offer_buy' %}" class="stack-form" style="margin-top:14px;">
+      {% csrf_token %}
+      <input type="hidden" name="operator" value="{{ form.operator }}">
+      <input type="hidden" name="amount" id="m-amount">
+      <label>Mobile number
+        <input type="text" name="number" id="m-number" value="{{ form.number }}" readonly>
+      </label>
+      <label>Number type
+        <select name="product">
+          <option value="prepaid">Prepaid</option>
+          <option value="postpaid">Postpaid</option>
+        </select>
+      </label>
+      <button type="submit" class="btn primary">Confirm buy</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<style>
+  .offer-form { display:flex; flex-wrap:wrap; align-items:end; gap:12px 16px; margin-top:8px; }
+  .offer-form label { display:grid; gap:6px; font-weight:700; color:var(--muted); font-size:12px; }
+  .offer-form input, .offer-form select { min-height:41px; padding:8px 10px; border:1px solid #bcccdc; border-radius:6px; background:#fff; font-weight:600; min-width:190px; }
+  .offer-topbar { display:flex; flex-wrap:wrap; gap:22px; margin-bottom:14px; }
+  .offer-stat span { color:var(--muted); font-size:12px; display:block; }
+  .offer-stat strong { color:var(--navy); font-size:18px; }
+  .offer-filters { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:6px; }
+  .filter-btn.active { background:var(--blue); color:#fff; border-color:var(--blue); }
+  .offer-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(210px,1fr)); gap:14px; }
+  .offer-card { border:1px solid var(--border); border-radius:10px; background:#f9fbfc; padding:14px; display:flex; flex-direction:column; gap:8px; }
+  .offer-top { display:flex; justify-content:space-between; align-items:center; }
+  .offer-price { background:linear-gradient(135deg,#27ae60,#2ecc71); color:#fff; font-weight:800; padding:4px 10px; border-radius:8px; }
+  .offer-summary { font-weight:700; color:var(--navy); min-height:38px; line-height:1.35; overflow-wrap:anywhere; }
+  .offer-meta { display:flex; gap:8px; flex-wrap:wrap; }
+  .offer-validity { background:#fff3d6; color:#8a5a00; font-weight:700; border-radius:999px; padding:2px 10px; font-size:12px; }
+  .offer-type { background:#eaf0f5; color:var(--muted); border-radius:999px; padding:2px 10px; font-size:12px; }
+  .offer-buy-btn { margin-top:auto; }
+  .offer-modal { position:fixed; inset:0; background:rgba(16,42,67,.5); display:flex; align-items:center; justify-content:center; z-index:1000; padding:16px; }
+  .offer-modal[hidden] { display:none; }
+  .offer-modal-box { background:#fff; border-radius:12px; padding:22px; width:min(480px,100%); box-shadow:0 20px 60px rgba(16,42,67,.3); }
+  .offer-modal-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .offer-modal-info { display:flex; gap:20px; flex-wrap:wrap; margin-top:12px; }
+  .offer-modal .stack-form input, .offer-modal .stack-form select { min-height:41px; padding:8px 10px; border:1px solid #bcccdc; border-radius:6px; }
+</style>
+<script>
+  (function () {
+    const grid = document.getElementById("offer-grid");
+    if (!grid) { return; }
+    const cards = Array.prototype.slice.call(grid.querySelectorAll(".offer-item"));
+    const buttons = Array.prototype.slice.call(document.querySelectorAll(".filter-btn"));
+    const statusEl = document.getElementById("offer-filter-status");
+    const active = new Set(["all"]);
+
+    function apply() {
+      const selected = Array.from(active).filter(function (f) { return f !== "all"; });
+      let visible = 0;
+      cards.forEach(function (card) {
+        let show = true;
+        if (selected.length) {
+          for (const f of selected) {
+            if (card.getAttribute("data-" + f) !== "yes") { show = false; break; }
+          }
+          // data + minutes together => only combo; each alone => exclude combo
+          if (show && selected.includes("data") && selected.includes("minutes")) {
+            if (card.getAttribute("data-combo") !== "yes") { show = false; }
+          } else if (show && selected.includes("data") && !selected.includes("minutes")) {
+            if (card.getAttribute("data-combo") === "yes") { show = false; }
+          } else if (show && selected.includes("minutes") && !selected.includes("data")) {
+            if (card.getAttribute("data-combo") === "yes") { show = false; }
+          }
+        }
+        card.hidden = !show;
+        if (show) { visible += 1; }
+      });
+      statusEl.textContent = selected.length
+        ? ("Showing " + visible + " offers matching: " + selected.join(" + "))
+        : ("Showing all " + cards.length + " offers");
+      buttons.forEach(function (b) {
+        b.classList.toggle("active", active.has(b.dataset.filter));
+        b.classList.toggle("primary", active.has(b.dataset.filter));
+      });
+    }
+
+    buttons.forEach(function (b) {
+      b.addEventListener("click", function () {
+        const f = b.dataset.filter;
+        if (f === "all") { active.clear(); active.add("all"); }
+        else {
+          active.delete("all");
+          if (active.has(f)) { active.delete(f); if (!active.size) active.add("all"); }
+          else { active.add(f); }
+        }
+        apply();
+      });
+    });
+    apply();
+
+    // Buy modal
+    const modal = document.getElementById("offer-modal");
+    document.querySelectorAll(".offer-buy-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        document.getElementById("m-summary").textContent = btn.dataset.summary;
+        document.getElementById("m-price").textContent = "৳ " + btn.dataset.amount;
+        document.getElementById("m-validity").textContent = btn.dataset.validity || "-";
+        document.getElementById("m-ussd").textContent = btn.dataset.ussd ? ("*" + btn.dataset.ussd + "#") : "-";
+        document.getElementById("m-amount").value = btn.dataset.amount;
+        modal.hidden = false;
+      });
+    });
+    document.getElementById("m-close").addEventListener("click", function () { modal.hidden = true; });
+    modal.addEventListener("click", function (e) { if (e.target === modal) { modal.hidden = true; } });
+  }());
+</script>
+{% endblock %}

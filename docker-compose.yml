@@ -1,0 +1,45 @@
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: flexiload
+      MYSQL_USER: flexiload
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
+      DJANGO_DEBUG: "false"
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DB_ENGINE: mysql
+      DB_NAME: flexiload
+      DB_USER: flexiload
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: db
+      DB_PORT: "3306"
+      PIN_ENCRYPTION_KEY: ${PIN_ENCRYPTION_KEY}
+      MODEM_BACKEND: ${MODEM_BACKEND:-mock}
+      MODEM_PORT: ${MODEM_PORT:-/dev/ttyUSB0}
+    ports:
+      - "8000:8000"
+    devices:
+      - "${MODEM_DEVICE:-/dev/null}:${MODEM_DEVICE:-/dev/null}"
+    volumes:
+      - ./logs:/app/logs
+
+volumes:
+  mysql_data:

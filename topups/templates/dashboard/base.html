@@ -1,0 +1,55 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Flexiload Control{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'topups/dashboard.css' %}">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="{% url 'dashboard:home' %}">
+      <span class="brand-mark">FL</span>
+      <span>Flexiload Control</span>
+    </a>
+    <nav>
+      <a class="{% if active_page == 'home' %}active{% endif %}" href="{% url 'dashboard:home' %}">Overview</a>
+      <a class="{% if active_page == 'modems' %}active{% endif %}" href="{% url 'dashboard:modems' %}">Modems & SIMs</a>
+      <a class="{% if active_page == 'topup' %}active{% endif %}" href="{% url 'dashboard:topup' %}">Send Top-up</a>
+      <a class="{% if active_page == 'offers' %}active{% endif %}" href="{% url 'dashboard:offers' %}">Offer Check</a>
+      <a class="{% if active_page == 'messages' %}active{% endif %}" href="{% url 'dashboard:messages' %}">Modem Messages</a>
+
+      <a class="{% if active_page == 'transactions' %}active{% endif %}" href="{% url 'dashboard:transactions' %}">Transactions</a>
+      <a class="{% if active_page == 'report' %}active{% endif %}" href="{% url 'dashboard:report' %}">Report</a>
+      <a class="{% if active_page == 'api_docs' %}active{% endif %}" href="{% url 'dashboard:api_docs' %}">API Documentation</a>
+    </nav>
+    <div class="sidebar-user">
+      <div><strong>{{ request.user.email|default:request.user.username }}</strong></div>
+      <div class="muted">{% if request.user.is_staff %}Administrator{% else %}Operator{% endif %}</div>
+      <form method="post" action="{% url 'dashboard:logout' %}">
+        {% csrf_token %}
+        <button class="link-button" type="submit">Sign out</button>
+      </form>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Telecom operations</p>
+        <h1>{% block heading %}Dashboard{% endblock %}</h1>
+      </div>
+      {% block header_action %}{% endblock %}
+    </header>
+    {% if messages %}
+      <div class="messages">
+        {% for message in messages %}
+          <div class="message {{ message.tags }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

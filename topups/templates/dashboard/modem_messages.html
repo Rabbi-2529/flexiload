@@ -1,0 +1,536 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Modem Messages | Flexiload Control{% endblock %}
+{% block heading %}Modem messages{% endblock %}
+{% block header_action %}
+  <form method="post" action="{% url 'dashboard:fetch_all_messages' %}">
+    {% csrf_token %}
+    <button class="btn primary" type="submit">Fetch all messages</button>
+  </form>
+{% endblock %}
+{% block content %}
+  <div
+    id="message-sync-banner"
+    class="mode-banner {% if modem_backend == 'serial' %}live{% else %}mock{% endif %}"
+    data-poll-interval-seconds="{{ message_poll_interval_seconds|default:20 }}"
+  >
+    Backend: <strong>{{ modem_backend|upper }}</strong>.
+    <span id="message-sync-status">
+      Automatic checking every {{ message_poll_interval_seconds }} seconds is active.
+    </span>
+  </div>
+
+  <div id="message-inboxes" data-message-version="{{ message_version|default:0 }}">
+  {% if inboxes %}
+    <div class="message-tabs" role="tablist" aria-label="SIM message inboxes">
+      <button
+        class="message-tab active"
+        type="button"
+        role="tab"
+        data-tab="sim-all"
+        aria-selected="true"
+      >
+        All SIMs
+        <span>Every message</span>
+        <strong>{{ message_total }}</strong>
+      </button>
+      {% for inbox in inboxes %}
+        <button
+          class="message-tab"
+          type="button"
+          role="tab"
+          data-tab="sim-{{ inbox.profile.pk }}"
+          aria-selected="false"
+        >
+          {{ inbox.profile.get_operator_display }}
+          <span>{{ inbox.profile.sim_number|default:inbox.profile.port }}</span>
+          <strong>{{ inbox.messages|length }}</strong>
+        </button>
+      {% endfor %}
+    </div>
+
+    <section
+      id="sim-all"
+      class="panel message-panel"
+      role="tabpanel"
+    >
+      <div class="panel-header">
+        <div>
+          <h2>All SIM messages</h2>
+          <span class="muted">Messages from every connected SIM, newest first</span>
+        </div>
+      </div>
+
+      <div class="data-toolbar message-data-toolbar">
+        <label>
+          Show
+          <select class="message-page-size">
+            <option value="10" selected>10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+          entries
+        </label>
+        <input
+          class="message-table-search"
+          type="search"
+          placeholder="Search message, number, carrier ID, sender or SIM"
+        >
+        <label>
+          From
+          <input class="message-date-from" type="date">
+        </label>
+        <label>
+          To
+          <input class="message-date-to" type="date">
+        </label>
+        <button class="btn small message-filter-clear" type="button">Clear filters</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="message-data-table data-table">
+          <thead>
+            <tr>
+              <th data-column="0">Received <span class="sort-mark"></span></th>
+              <th data-column="1">SIM <span class="sort-mark"></span></th>
+              <th data-column="2">Sender <span class="sort-mark"></span></th>
+              <th data-column="3">Full message <span class="sort-mark"></span></th>
+              <th data-column="4">Target <span class="sort-mark"></span></th>
+              <th data-column="5">Carrier ID <span class="sort-mark"></span></th>
+              <th data-column="6">Transaction <span class="sort-mark"></span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for inbox in inboxes %}
+              {% for row in inbox.messages %}
+                <tr data-message-date="{{ row.message_date }}">
+                  <td data-sort="{{ row.message.stored_at|date:'YmdHis' }}">
+                    {% if row.message.modem_timestamp %}
+                      {{ row.message.modem_timestamp }}
+                    {% else %}
+                      {{ row.message.stored_at|date:"Y-m-d H:i:s" }}
+                    {% endif %}
+                    <div><span class="badge">{{ row.message.status|default:"Stored" }}</span></div>
+                  </td>
+                  <td>
+                    {{ inbox.profile.get_operator_display }}
+                    <div class="muted">{{ inbox.profile.sim_number|default:inbox.profile.port }}</div>
+                  </td>
+                  <td>{{ row.message.sender|default:"Unknown sender" }}</td>
+                  <td class="message-cell">
+                    <div class="sms-body" dir="auto">{{ row.message.text|default:"Empty message" }}</div>
+                  </td>
+                  <td>{{ row.target_number|default:"-" }}</td>
+                  <td>{{ row.carrier_transaction_id|default:"-" }}</td>
+                  <td class="action-cell">
+                    {% if row.transaction %}
+                      <a class="btn small" href="{% url 'dashboard:transaction_detail' row.transaction.pk %}">
+                        View transaction
+                      </a>
+                      <div>
+                        <span class="badge {{ row.transaction.status }}">
+                          {{ row.transaction.get_status_display }}
+                        </span>
+                      </div>
+                    {% else %}
+                      <span class="badge">No match</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            {% empty %}
+              <tr class="source-empty">
+                <td colspan="7" class="empty">No messages have been archived yet.</td>
+              </tr>
+            {% endfor %}
+            {% if message_total == 0 %}
+              <tr class="source-empty">
+                <td colspan="7" class="empty">No messages have been archived yet.</td>
+              </tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="data-footer">
+        <span class="message-table-info">Showing 0 entries</span>
+        <div class="pagination message-table-pagination"></div>
+      </div>
+    </section>
+
+    {% for inbox in inboxes %}
+      <section
+        id="sim-{{ inbox.profile.pk }}"
+        class="panel message-panel"
+        role="tabpanel"
+        hidden
+      >
+        <div class="panel-header">
+          <div>
+            <h2>{{ inbox.profile.get_operator_display }} messages</h2>
+            <span class="muted">
+              {{ inbox.profile.sim_number|default:inbox.profile.name }} on {{ inbox.profile.port }}
+            </span>
+          </div>
+          <form
+            method="post"
+            action="{% url 'dashboard:clear_messages' inbox.profile.pk %}"
+            onsubmit="return confirm('Clear the modem and archived messages for {{ inbox.profile.port|escapejs }}?');"
+          >
+            {% csrf_token %}
+            <button class="btn danger" type="submit">Clear messages</button>
+          </form>
+        </div>
+
+        <div class="data-toolbar message-data-toolbar">
+          <label>
+            Show
+            <select class="message-page-size">
+              <option value="10" selected>10</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+            entries
+          </label>
+          <input
+            class="message-table-search"
+            type="search"
+            placeholder="Search message, number, carrier ID, or sender"
+          >
+          <label>
+            From
+            <input class="message-date-from" type="date">
+          </label>
+          <label>
+            To
+            <input class="message-date-to" type="date">
+          </label>
+          <button class="btn small message-filter-clear" type="button">Clear filters</button>
+        </div>
+
+        <div class="table-wrap">
+          <table class="message-data-table data-table">
+            <thead>
+              <tr>
+                <th data-column="0">Received <span class="sort-mark"></span></th>
+                <th data-column="1">Sender <span class="sort-mark"></span></th>
+                <th data-column="2">Full message <span class="sort-mark"></span></th>
+                <th data-column="3">Target <span class="sort-mark"></span></th>
+                <th data-column="4">Carrier ID <span class="sort-mark"></span></th>
+                <th data-column="5">Transaction <span class="sort-mark"></span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in inbox.messages %}
+                <tr data-message-date="{{ row.message_date }}">
+                  <td data-sort="{% if row.message.modem_timestamp %}{{ row.message.modem_timestamp }}{% else %}{{ row.message.stored_at|date:'YmdHis' }}{% endif %}">
+                    {% if row.message.modem_timestamp %}
+                      {{ row.message.modem_timestamp }}
+                    {% else %}
+                      {{ row.message.stored_at|date:"Y-m-d H:i:s" }}
+                    {% endif %}
+                    <div><span class="badge">{{ row.message.status|default:"Stored" }}</span></div>
+                  </td>
+                  <td>{{ row.message.sender|default:"Unknown sender" }}</td>
+                  <td class="message-cell">
+                    <div class="sms-body" dir="auto">{{ row.message.text|default:"Empty message" }}</div>
+                  </td>
+                  <td>{{ row.target_number|default:"-" }}</td>
+                  <td>{{ row.carrier_transaction_id|default:"-" }}</td>
+                  <td class="action-cell">
+                    {% if row.transaction %}
+                      <a class="btn small" href="{% url 'dashboard:transaction_detail' row.transaction.pk %}">
+                        View transaction
+                      </a>
+                      <div>
+                        <span class="badge {{ row.transaction.status }}">
+                          {{ row.transaction.get_status_display }}
+                        </span>
+                      </div>
+                    {% else %}
+                      <span class="badge">No match</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr class="source-empty">
+                  <td colspan="6" class="empty">No messages have been archived for this SIM.</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="data-footer">
+          <span class="message-table-info">Showing 0 entries</span>
+          <div class="pagination message-table-pagination"></div>
+        </div>
+      </section>
+    {% endfor %}
+  {% else %}
+    <section class="panel">
+      <p class="empty">No active modem connection was found. Connect a SIM modem first.</p>
+    </section>
+  {% endif %}
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (function () {
+      let tabs = [];
+      let panels = [];
+      const status = document.getElementById("message-sync-status");
+      const csrfInput = document.querySelector(
+        'form[action="{% url "dashboard:fetch_all_messages" %}"] input[name="csrfmiddlewaretoken"]'
+      );
+      const syncBanner = document.getElementById("message-sync-banner");
+      const pollInterval = Number(
+        syncBanner ? syncBanner.dataset.pollIntervalSeconds : 20
+      ) * 1000;
+      let syncing = false;
+
+      function setupDataTable(panel) {
+        const table = panel.querySelector(".message-data-table");
+        const sourceRows = Array.from(
+          table.querySelectorAll("tbody tr:not(.source-empty)")
+        );
+        const search = panel.querySelector(".message-table-search");
+        const dateFrom = panel.querySelector(".message-date-from");
+        const dateTo = panel.querySelector(".message-date-to");
+        const clearFilters = panel.querySelector(".message-filter-clear");
+        const pageSize = panel.querySelector(".message-page-size");
+        const info = panel.querySelector(".message-table-info");
+        const pagination = panel.querySelector(".message-table-pagination");
+        let currentPage = 1;
+        let sortColumn = 0;
+        let sortDirection = "desc";
+
+        function cellValue(row, column) {
+          const cell = row.cells[column];
+          return (cell.dataset.sort || cell.textContent).trim().toLowerCase();
+        }
+
+        function filteredRows() {
+          const query = search.value.trim().toLowerCase();
+          return sourceRows.filter(function (row) {
+            const rowDate = row.dataset.messageDate;
+            const searchMatches = !query || row.textContent.toLowerCase().includes(query);
+            const fromMatches = !dateFrom.value || rowDate >= dateFrom.value;
+            const toMatches = !dateTo.value || rowDate <= dateTo.value;
+            return searchMatches && fromMatches && toMatches;
+          }).sort(function (leftRow, rightRow) {
+            const left = cellValue(leftRow, sortColumn);
+            const right = cellValue(rightRow, sortColumn);
+            const result = left.localeCompare(right, undefined, { numeric: true });
+            return sortDirection === "asc" ? result : -result;
+          });
+        }
+
+        function pageButton(label, page, disabled, active) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = label;
+          button.className = "btn small" + (active ? " primary" : "");
+          button.disabled = disabled;
+          button.addEventListener("click", function () {
+            currentPage = page;
+            render();
+          });
+          return button;
+        }
+
+        function render() {
+          const rows = filteredRows();
+          const size = Number(pageSize.value);
+          const pageCount = Math.max(1, Math.ceil(rows.length / size));
+          currentPage = Math.min(currentPage, pageCount);
+          const start = (currentPage - 1) * size;
+          const visibleRows = rows.slice(start, start + size);
+
+          sourceRows.forEach(function (row) { row.hidden = true; });
+          visibleRows.forEach(function (row) {
+            row.hidden = false;
+            table.tBodies[0].appendChild(row);
+          });
+
+          info.textContent = rows.length
+            ? "Showing " + (start + 1) + " to "
+              + Math.min(start + size, rows.length) + " of "
+              + rows.length + " entries"
+            : "Showing 0 entries";
+
+          pagination.replaceChildren();
+          pagination.appendChild(
+            pageButton("Previous", currentPage - 1, currentPage === 1, false)
+          );
+          for (let page = 1; page <= pageCount; page += 1) {
+            if (
+              pageCount <= 7
+              || page === 1
+              || page === pageCount
+              || Math.abs(page - currentPage) <= 1
+            ) {
+              pagination.appendChild(
+                pageButton(String(page), page, false, page === currentPage)
+              );
+            }
+          }
+          pagination.appendChild(
+            pageButton("Next", currentPage + 1, currentPage === pageCount, false)
+          );
+
+          table.querySelectorAll("th[data-column]").forEach(function (header) {
+            const selected = Number(header.dataset.column) === sortColumn;
+            header.classList.toggle("sorted", selected);
+            header.querySelector(".sort-mark").textContent = selected
+              ? (sortDirection === "asc" ? " ^" : " v")
+              : "";
+          });
+        }
+
+        search.addEventListener("input", function () {
+          currentPage = 1;
+          render();
+        });
+        dateFrom.addEventListener("change", function () {
+          if (dateTo.value && dateFrom.value > dateTo.value) {
+            dateTo.value = dateFrom.value;
+          }
+          currentPage = 1;
+          render();
+        });
+        dateTo.addEventListener("change", function () {
+          if (dateFrom.value && dateTo.value < dateFrom.value) {
+            dateFrom.value = dateTo.value;
+          }
+          currentPage = 1;
+          render();
+        });
+        clearFilters.addEventListener("click", function () {
+          search.value = "";
+          dateFrom.value = "";
+          dateTo.value = "";
+          currentPage = 1;
+          render();
+        });
+        pageSize.addEventListener("change", function () {
+          currentPage = 1;
+          render();
+        });
+        table.querySelectorAll("th[data-column]").forEach(function (header) {
+          header.addEventListener("click", function () {
+            const column = Number(header.dataset.column);
+            if (sortColumn === column) {
+              sortDirection = sortDirection === "asc" ? "desc" : "asc";
+            } else {
+              sortColumn = column;
+              sortDirection = "asc";
+            }
+            render();
+          });
+        });
+        render();
+      }
+
+      function activateTab(tab) {
+        tabs.forEach(function (item) {
+          const active = item === tab;
+          item.classList.toggle("active", active);
+          item.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        panels.forEach(function (panel) {
+          panel.hidden = panel.id !== tab.dataset.tab;
+        });
+      }
+
+      function bindInboxUi(preferredTabId) {
+        tabs = Array.from(document.querySelectorAll(".message-tab"));
+        panels = Array.from(document.querySelectorAll(".message-panel"));
+        panels.forEach(setupDataTable);
+        tabs.forEach(function (tab) {
+          tab.addEventListener("click", function () {
+            activateTab(tab);
+          });
+        });
+        const selectedTab = tabs.find(function (tab) {
+          return tab.dataset.tab === preferredTabId;
+        }) || tabs.find(function (tab) {
+          return tab.classList.contains("active");
+        }) || tabs[0];
+        if (selectedTab) {
+          activateTab(selectedTab);
+        }
+      }
+
+      async function refreshInboxes() {
+        const currentInboxes = document.getElementById("message-inboxes");
+        const activeTab = document.querySelector(".message-tab.active");
+        const response = await fetch(window.location.href, {
+          headers: {"X-Requested-With": "XMLHttpRequest"},
+          credentials: "same-origin"
+        });
+        if (!response.ok) {
+          throw new Error("Could not refresh message inboxes.");
+        }
+        const html = await response.text();
+        const parsed = new DOMParser().parseFromString(html, "text/html");
+        const updatedInboxes = parsed.getElementById("message-inboxes");
+        if (!currentInboxes || !updatedInboxes) {
+          throw new Error("Message inbox content was missing.");
+        }
+        currentInboxes.replaceWith(updatedInboxes);
+        bindInboxUi(activeTab ? activeTab.dataset.tab : "");
+      }
+
+      bindInboxUi("");
+
+      async function syncMessages() {
+        if (syncing || document.hidden || !csrfInput) {
+          return;
+        }
+        syncing = true;
+        status.textContent = "Checking connected SIMs...";
+        try {
+          const response = await fetch("{% url 'dashboard:sync_messages' %}", {
+            method: "POST",
+            headers: {
+              "X-CSRFToken": csrfInput.value,
+              "X-Requested-With": "XMLHttpRequest"
+            },
+            credentials: "same-origin"
+          });
+          if (!response.ok) {
+            throw new Error("Message sync failed.");
+          }
+          const result = await response.json();
+          const inboxes = document.getElementById("message-inboxes");
+          const currentVersion = inboxes ? inboxes.dataset.messageVersion : "0";
+          if (String(result.message_version) !== currentVersion) {
+            await refreshInboxes();
+            status.textContent = result.imported > 0
+              ? result.imported + " new message(s) received."
+              : "Message inbox updated.";
+          } else {
+            status.textContent = result.errors.length
+              ? "Some modem ports could not be checked."
+              : "No new messages. Checking again automatically.";
+          }
+        } catch (error) {
+          status.textContent = "Automatic check failed; use Fetch all messages.";
+        } finally {
+          syncing = false;
+        }
+      }
+
+      document.addEventListener("visibilitychange", function () {
+        if (!document.hidden) {
+          syncMessages();
+        }
+      });
+      syncMessages();
+      window.setInterval(syncMessages, pollInterval);
+    }());
+  </script>
+{% endblock %}

@@ -1,0 +1,209 @@
+    // =========================================================================
+    //  OFFER CHECK  (talks to the backend API at YOUR_SERVER_IP:8080)
+    //  The offers/check endpoint is PUBLIC now — no login / no token needed.
+    // =========================================================================
+
+    private $iglBaseUrl = 'http://YOUR_SERVER_IP:8080/api/';
+
+    // Operators shown in the form.
+    private array $operatorChoices = [
+        'grameen'  => 'Grameenphone',
+        'rb'       => 'Robi',
+        'at'       => 'Airtel',
+        'bl'       => 'Banglalink',
+        'teletalk' => 'Teletalk',
+    ];
+
+    // Filter buttons / category keys the offer cards use.
+    private array $categoryLabels = [
+        'all'       => 'All Offers',
+        '30days'    => '30 Days',
+        '7days'     => '7 Days',
+        'data'      => 'Data',
+        'minutes'   => 'Minutes',
+        'combo'     => 'Combo',
+        'social'    => 'Social',
+        'streaming' => 'Streaming',
+        'unlimited' => 'Unlimited',
+    ];
+
+    /** Show the empty form. */
+    public function offerForm()
+    {
+        return view('user.flexiload.offer-check', [
+            'operators'  => $this->operatorChoices,
+            'categories' => $this->categoryLabels,
+            'form'       => ['operator' => 'bl', 'number' => '', 'amount' => '10'],
+            'result'     => null,
+            'error'      => null,
+        ]);
+    }
+
+    /** Handle the form submit and fetch offers from the backend. */
+    public function checkOffer(Request $request)
+    {
+        $form = [
+            'operator' => trim((string) $request->input('operator')),
+            'number'   => trim((string) $request->input('number')),
+            'amount'   => trim((string) $request->input('amount', '10')),
+        ];
+
+        $result = null;
+        $error  = null;
+
+        try {
+            $result = $this->fetchOffers($form['operator'], $form['number'], $form['amount']);
+        } catch (\Throwable $e) {
+            $error = $e->getMessage();
+        }
+
+        return view('user.flexiload.offer-check', [
+            'operators'  => $this->operatorChoices,
+            'categories' => $this->categoryLabels,
+            'form'       => $form,
+            'result'     => $result,
+            'error'      => $error,
+        ]);
+    }
+
+    /** JSON endpoint (optional). */
+    public function checkOfferApi(Request $request)
+    {
+        try {
+            $result = $this->fetchOffers(
+                (string) $request->input('operator'),
+                (string) $request->input('number'),
+                $request->input('amount', 10)
+            );
+        } catch (\Throwable $e) {
+            return response()->json(['error' => $e->getMessage()], 400);
+        }
+
+        return response()->json([
+            'operator' => $request->input('operator'),
+            'number'   => $request->input('number'),
+            'amount'   => $request->input('amount'),
+            'count'    => $result['counts']['all'],
+            'offers'   => $result['offers'],
+        ]);
+    }
+
+    /**
+     * Call the backend offer-check endpoint (no auth) and return the offers plus
+     * per-category counts/filters the blade needs. The backend already returns
+     * normalized offers with a 'cat' map, so no normalization here.
+     *
+     * @throws \InvalidArgumentException on bad input
+     * @throws \RuntimeException on API/network problems
+     */
+    private function fetchOffers(string $operator, string $number, $amount): array
+    {
+        $operator = strtolower(trim($operator));
+        $number   = trim($number);
+
+        if (!preg_match('/^(?:\+?88)?01[3-9]\d{8}$/', $number)) {
+            throw new \InvalidArgumentException('Enter a valid Bangladesh mobile number.');
+        }
+        $amount = (int) $amount;
+        if ($amount <= 0) {
+            throw new \InvalidArgumentException('Enter a valid amount.');
+        }
+
+        try {
+            $client = new Client([
+                'timeout'     => 30,
+                'verify'      => false,
+                'http_errors' => false,
+            ]);
+
+            // Public endpoint: no Authorization header.
+            $response = $client->post($this->iglBaseUrl . 'offers/check/', [
+                'headers' => ['Accept' => 'application/json'],
+                'json'    => [
+                    'operator' => $operator,
+                    'number'   => $number,
+                    'amount'   => $amount,
+                ],
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Offer check request failed: ' . $e->getMessage());
+            throw new \RuntimeException('Offer API request failed or timed out. Please try again.');
+        }
+
+        $status = $response->getStatusCode();
+        $raw    = (string) $response->getBody();
+
+        if ($status < 200 || $status >= 300) {
+            Log::error("Offer check HTTP {$status}: " . substr($raw, 0, 300));
+            // The API returns {"error":"..."} on 400 (bad number/operator).
+            $decoded = json_decode($raw, true);
+            if (isset($decoded['error'])) {
+                throw new \RuntimeException($decoded['error']);
+            }
+            throw new \RuntimeException("Offer API error ({$status}). Please try again.");
+        }
+
+        $body   = json_decode($raw, true) ?: [];
+        $offers = $body['offers'] ?? [];
+
+        // Per-category counts for the filter buttons.
+        $counts = array_fill_keys(array_keys($this->categoryLabels), 0);
+        $counts['all'] = count($offers);
+        foreach ($offers as $offer) {
+            foreach (($offer['cat'] ?? []) as $key => $isOn) {
+                if ($isOn && isset($counts[$key])) {
+                    $counts[$key]++;
+                }
+            }
+        }
+
+        $filters = [];
+        foreach ($this->categoryLabels as $key => $label) {
+            $filters[] = ['key' => $key, 'label' => $label, 'count' => $counts[$key] ?? 0];
+        }
+
+        return [
+            'offers'     => $offers,
+            'counts'     => $counts,
+            'filters'    => $filters,
+            'message'    => $body['message'] ?? '',
+            'uiOperator' => $operator,
+        ];
+    }
+
+    /**
+     * Buy an offer. This does NOT duplicate any load logic — it reshapes the
+     * offer-check modal fields into the fields your existing single-load method
+     * expects, then hands off to flexiloadFormProcess(). So LoadCamPending
+     * insert, balance debit, etc. all stay in your one existing method.
+     */
+    public function buyOfferProcess(Request $request)
+    {
+        $request->validate([
+            'offer_amount'    => 'required|integer|min:10|max:50000',
+            'number_type'     => 'required',
+            'targeted_number' => 'required',
+            'flexipin'        => 'required',
+            'operator'        => 'required',
+        ]);
+
+        // Map the offer-check operator (grameen/rb/at/bl) to the operator
+        // string your load tables use (gp/robi/airtel/blink).
+        $alias = [
+            'grameen'  => 'gp',     'gp'     => 'gp',
+            'rb'       => 'robi',   'robi'   => 'robi',
+            'at'       => 'airtel', 'airtel' => 'airtel',
+            'bl'       => 'blink',  'blink'  => 'blink',
+            'teletalk' => 'teletalk',
+        ];
+        $operator = $alias[strtolower($request->operator)] ?? $request->operator;
+
+        // Reshape into what flexiloadFormProcess() reads, then delegate to it.
+        $request->merge([
+            'amount'              => (int) $request->offer_amount,
+            'operator'            => $operator,
+            'dynamic_name_column' => $request->owner_name ?? '',
+        ]);
+
+        return $this->flexiloadFormProcess($request);
+    }

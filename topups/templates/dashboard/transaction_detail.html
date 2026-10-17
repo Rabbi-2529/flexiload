@@ -1,0 +1,193 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}
+  Transaction {{ transaction.pk }} | Flexiload Control
+{% endblock %}
+
+{% block heading %}Transaction detail{% endblock %}
+
+{% block header_action %}
+  <a class="btn" href="{% url 'dashboard:transactions' %}">
+    Back to history
+  </a>
+{% endblock %}
+
+{% block content %}
+  <section class="detail-grid">
+    <article class="panel">
+      <div class="panel-header">
+        <h2>{{ transaction.pk }}</h2>
+
+        <span class="badge {{ transaction.status }}">
+          {{ transaction.get_status_display }}
+        </span>
+      </div>
+
+      <dl class="details large">
+        <dt>Created</dt>
+        <dd>
+          {{ transaction.created_at|date:"Y-m-d H:i:s T" }}
+        </dd>
+
+        <dt>Completed</dt>
+        <dd>
+          {{ transaction.completed_at|date:"Y-m-d H:i:s T"|default:"-" }}
+        </dd>
+
+        <dt>User</dt>
+        <dd>{{ transaction.user.username }}</dd>
+
+        <dt>Source SIM</dt>
+        <dd>
+          {{ transaction.sim_profile.sim_number|default:"Not available" }}
+        </dd>
+
+        <dt>Source port</dt>
+        <dd>{{ transaction.sim_profile.port }}</dd>
+
+        <dt>Operator</dt>
+        <dd>{{ transaction.get_operator_display }}</dd>
+
+        <dt>Product</dt>
+        <dd>{{ transaction.get_product_display }}</dd>
+
+        <dt>Destination</dt>
+        <dd>{{ transaction.phone_number }}</dd>
+
+        <dt>Amount</dt>
+        <dd>BDT {{ transaction.amount }}</dd>
+
+        <dt>Retry count</dt>
+        <dd>
+          <strong>{{ transaction.retry_count }}</strong>
+          time{{ transaction.retry_count|pluralize }}
+        </dd>
+
+        <dt>Last retried</dt>
+        <dd>
+          {{ transaction.last_retried_at|date:"Y-m-d H:i:s T"|default:"Never" }}
+        </dd>
+
+        <dt>Idempotency key</dt>
+        <dd>{{ transaction.idempotency_key|default:"-" }}</dd>
+      </dl>
+    </article>
+
+    <article class="panel">
+      <h2>Complete modem response</h2>
+
+      <pre class="response-box">{{ transaction.modem_response|default:"No modem response was captured." }}</pre>
+
+      {% if transaction.error_message %}
+        <h3>Error</h3>
+        <pre class="response-box error">{{ transaction.error_message }}</pre>
+      {% endif %}
+    </article>
+  </section>
+
+  {% if transaction.status == "failed" %}
+    <section class="panel">
+      <h2>Retry failed top-up</h2>
+
+      <p class="muted">
+        Retry the same destination, amount, product, SIM and
+        idempotency key after restoring the SIM load balance.
+      </p>
+
+      {% if not transaction.idempotency_key %}
+        <p class="field-error">
+          This transaction has no idempotency key and cannot
+          be retried safely.
+        </p>
+      {% endif %}
+
+      <form
+        method="post"
+        onsubmit="return confirm('Dial this failed top-up again?');"
+      >
+        {% csrf_token %}
+
+        <button
+          class="btn primary"
+          type="submit"
+          name="action"
+          value="retry_failed"
+          {% if not transaction.idempotency_key %}disabled{% endif %}
+        >
+          Retry failed top-up
+        </button>
+      </form>
+    </section>
+  {% endif %}
+
+  {% if request.user.is_staff %}
+    <section class="panel">
+      <h2>Manual status and webhook test</h2>
+
+      <div class="two-column">
+        <form method="post" class="stack-form compact">
+          {% csrf_token %}
+
+          <label for="manual-status">
+            Transaction status
+          </label>
+
+          <select
+            id="manual-status"
+            name="status"
+            required
+          >
+            {% for value, label in status_choices %}
+              <option
+                value="{{ value }}"
+                {% if transaction.status == value %}selected{% endif %}
+              >
+                {{ label }}
+              </option>
+            {% endfor %}
+          </select>
+
+          <button
+            class="btn primary"
+            type="submit"
+            name="action"
+            value="update_status"
+          >
+            Update status
+          </button>
+        </form>
+
+        <form method="post" class="stack-form compact">
+          {% csrf_token %}
+
+          <p class="muted">
+            Sends the current final status, idempotency key,
+            carrier ID, modem message and retry information
+            to Laravel.
+          </p>
+
+          {% if not transaction.idempotency_key %}
+            <p class="field-error">
+              This transaction has no idempotency key, so
+              Laravel cannot match its SMS ID.
+            </p>
+          {% elif not webhook_configured %}
+            <p class="field-error">
+              IGL_WEBHOOK_URL is not configured.
+            </p>
+          {% endif %}
+
+          <button
+            class="btn"
+            type="submit"
+            name="action"
+            value="send_webhook"
+            {% if not transaction.idempotency_key or not webhook_configured %}disabled{% endif %}
+          >
+            Send webhook now
+          </button>
+        </form>
+      </div>
+    </section>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,29 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in | Flexiload Control</title>
+  <link rel="stylesheet" href="{% static 'topups/dashboard.css' %}">
+</head>
+<body class="login-body">
+  <main class="login-card">
+    <div class="brand login-brand">
+      <span class="brand-mark">FL</span>
+      <span>Flexiload Control</span>
+    </div>
+    <p class="eyebrow">Secure operator access</p>
+    <h1>Sign in</h1>
+    <form method="post" class="stack-form">
+      {% csrf_token %}
+      {% if form.non_field_errors %}<div class="field-error">{{ form.non_field_errors }}</div>{% endif %}
+      <label for="{{ form.email.id_for_label }}">Email address</label>
+      {{ form.email }}
+      <label for="{{ form.password.id_for_label }}">Password</label>
+      {{ form.password }}
+      <button class="btn primary" type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

@@ -1,0 +1,215 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Report | Flexiload Control{% endblock %}
+{% block heading %}Transaction report{% endblock %}
+
+{% block header_action %}
+  <a class="btn primary" id="download-pdf"
+     href="{% url 'dashboard:report' %}{% if query_string %}?{{ query_string }}&download=pdf{% else %}?download=pdf{% endif %}">
+    &#8681; Download PDF
+  </a>
+{% endblock %}
+
+{% block content %}
+
+<section class="stats-grid report-stats">
+  <div class="stat-card"><span>Total</span><strong>{{ totals.count }}</strong></div>
+  <div class="stat-card"><span>Success</span><strong style="color:var(--green)">{{ totals.success }}</strong></div>
+  <div class="stat-card"><span>Failed</span><strong style="color:var(--red)">{{ totals.failed }}</strong></div>
+  <div class="stat-card"><span>Pending / Processing</span><strong style="color:var(--amber)">{{ totals.pending }}</strong></div>
+  <div class="stat-card"><span>Success amount</span><strong>৳ {{ totals.success_amount }}</strong></div>
+</section>
+
+<section class="panel">
+  <div class="panel-header" style="margin-bottom:14px;">
+    <h2 style="margin:0;">Filters</h2>
+  </div>
+
+  <form method="get" id="report-filters">
+    <div class="quick-ranges" id="quick-ranges">
+      <button type="button" class="btn small" data-range="today">Today</button>
+      <button type="button" class="btn small" data-range="yesterday">Yesterday</button>
+      <button type="button" class="btn small" data-range="7">Last 7 days</button>
+      <button type="button" class="btn small" data-range="30">Last 30 days</button>
+      <button type="button" class="btn small" data-range="month">This month</button>
+      <button type="button" class="btn small" data-range="all">All time</button>
+    </div>
+
+    <div class="report-filter-grid">
+      <label>From
+        <input type="date" name="from" id="f-from" value="{{ filters.from }}">
+      </label>
+      <label>To
+        <input type="date" name="to" id="f-to" value="{{ filters.to }}">
+      </label>
+      <label>Status
+        <select name="status">
+          <option value="">All statuses</option>
+          {% for value, label in status_choices %}
+            <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Operator
+        <select name="operator">
+          <option value="">All operators</option>
+          <option value="grameenphone" {% if filters.operator == 'grameenphone' %}selected{% endif %}>Grameenphone</option>
+          <option value="robi" {% if filters.operator == 'robi' %}selected{% endif %}>Robi</option>
+          <option value="airtel" {% if filters.operator == 'airtel' %}selected{% endif %}>Airtel</option>
+          <option value="banglalink" {% if filters.operator == 'banglalink' %}selected{% endif %}>Banglalink</option>
+          <option value="teletalk" {% if filters.operator == 'teletalk' %}selected{% endif %}>Teletalk</option>
+        </select>
+      </label>
+      <div class="report-filter-actions">
+        <button class="btn primary" type="submit">Apply</button>
+        <a class="btn" href="{% url 'dashboard:report' %}">Reset</a>
+      </div>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="data-toolbar">
+    <label>
+      Show
+      <select id="page-size">
+        <option value="10">10</option>
+        <option value="25" selected>25</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+      </select>
+      entries
+    </label>
+    <span></span>
+    <input id="table-search" type="search" placeholder="Search in results (number, ID, operator…)">
+  </div>
+
+  <div class="table-wrap">
+    <table id="report-table" class="data-table">
+      <thead>
+        <tr>
+          <th data-column="0">Date <span class="sort-mark"></span></th>
+          <th data-column="1">Destination <span class="sort-mark"></span></th>
+          <th data-column="2">Operator <span class="sort-mark"></span></th>
+          <th data-column="3">Product <span class="sort-mark"></span></th>
+          <th data-column="4">Amount <span class="sort-mark"></span></th>
+          <th data-column="5">Status <span class="sort-mark"></span></th>
+          <th data-column="6">Transaction ID <span class="sort-mark"></span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in rows %}
+          <tr>
+            <td data-sort="{{ item.created_at|date:'YmdHis' }}">{{ item.created_at|date:"Y-m-d H:i" }}</td>
+            <td>
+              <a href="{% url 'dashboard:transaction_detail' item.pk %}">{{ item.phone_number }}</a>
+            </td>
+            <td>{{ item.get_operator_display }}</td>
+            <td>{{ item.get_product_display }}</td>
+            <td data-sort="{{ item.amount }}">৳ {{ item.amount }}</td>
+            <td><span class="badge {{ item.status }}">{{ item.get_status_display }}</span></td>
+            <td class="mono">{{ item.carrier_id|default:"—" }}</td>
+          </tr>
+        {% empty %}
+          <tr class="source-empty"><td colspan="7" class="empty">No transactions match this filter.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="data-footer">
+    <span id="table-info">Showing 0 entries</span>
+    <div class="pagination" id="table-pagination"></div>
+  </div>
+  <p class="muted" style="margin:12px 0 0; font-size:12px;">
+    Up to 1000 rows shown here. The PDF includes every matching row (up to 5000).
+  </p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<style>
+  .report-stats { grid-template-columns: repeat(5, minmax(0,1fr)); }
+  .quick-ranges { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+  .quick-ranges .btn.active { border-color:var(--blue); color:#fff; background:var(--blue); }
+  .report-filter-grid { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)) auto; gap:12px; align-items:end; }
+  .report-filter-grid label { display:grid; gap:6px; font-weight:700; color:var(--muted); font-size:12px; }
+  .report-filter-grid input, .report-filter-grid select { min-height:41px; padding:8px 10px; border:1px solid #bcccdc; border-radius:6px; background:#fff; color:var(--text); font-weight:600; }
+  .report-filter-actions { display:flex; gap:8px; }
+  td.mono { font-family: Consolas, monospace; font-size:12px; color:var(--muted); }
+  @media (max-width: 950px){ .report-stats{ grid-template-columns: repeat(2,1fr);} .report-filter-grid{ grid-template-columns:1fr 1fr;} }
+  @media (max-width: 560px){ .report-stats{ grid-template-columns:1fr;} .report-filter-grid{ grid-template-columns:1fr;} }
+</style>
+<script>
+  (function () {
+    // ---- Customized date filter: quick ranges fill From/To and submit ----
+    function fmt(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+    var from = document.getElementById("f-from");
+    var to = document.getElementById("f-to");
+    document.getElementById("quick-ranges").addEventListener("click", function(e){
+      var btn = e.target.closest("button[data-range]");
+      if(!btn) return;
+      var r = btn.dataset.range, now = new Date(), a = new Date(), b = new Date();
+      if(r==="today"){ }
+      else if(r==="yesterday"){ a.setDate(now.getDate()-1); b.setDate(now.getDate()-1); }
+      else if(r==="7"){ a.setDate(now.getDate()-6); }
+      else if(r==="30"){ a.setDate(now.getDate()-29); }
+      else if(r==="month"){ a = new Date(now.getFullYear(), now.getMonth(), 1); }
+      else if(r==="all"){ from.value=""; to.value=""; document.getElementById("report-filters").submit(); return; }
+      from.value = fmt(a); to.value = fmt(b);
+      document.getElementById("report-filters").submit();
+    });
+
+    // ---- Interactive data table (search, sort, paginate) ----
+    var table = document.getElementById("report-table");
+    var sourceRows = Array.prototype.slice.call(table.querySelectorAll("tbody tr:not(.source-empty)"));
+    var search = document.getElementById("table-search");
+    var pageSize = document.getElementById("page-size");
+    var info = document.getElementById("table-info");
+    var pagination = document.getElementById("table-pagination");
+    var currentPage = 1, sortColumn = 0, sortDirection = "desc";
+    if(!sourceRows.length) return;
+
+    function cellValue(row, col){ var c=row.cells[col]; return (c.dataset.sort||c.textContent).trim().toLowerCase(); }
+    function filtered(){
+      var q = search.value.trim().toLowerCase();
+      return sourceRows.filter(function(row){ return !q || row.textContent.toLowerCase().indexOf(q)>=0; })
+        .sort(function(a,b){
+          var l=cellValue(a,sortColumn), r=cellValue(b,sortColumn);
+          var res=l.localeCompare(r,undefined,{numeric:true});
+          return sortDirection==="asc"?res:-res;
+        });
+    }
+    function pageButton(label,page,disabled,active){
+      var b=document.createElement("button"); b.type="button"; b.textContent=label;
+      b.className="btn small"+(active?" primary":""); b.disabled=disabled;
+      b.addEventListener("click",function(){ currentPage=page; render(); }); return b;
+    }
+    function render(){
+      var rows=filtered(), size=Number(pageSize.value), pages=Math.max(1,Math.ceil(rows.length/size));
+      currentPage=Math.min(currentPage,pages);
+      var start=(currentPage-1)*size, visible=rows.slice(start,start+size);
+      sourceRows.forEach(function(r){ r.hidden=true; });
+      visible.forEach(function(r){ r.hidden=false; table.tBodies[0].appendChild(r); });
+      info.textContent = rows.length ? ("Showing "+(start+1)+" to "+Math.min(start+size,rows.length)+" of "+rows.length+" entries") : "Showing 0 entries";
+      pagination.replaceChildren();
+      pagination.appendChild(pageButton("Previous",currentPage-1,currentPage===1,false));
+      for(var p=1;p<=pages;p+=1){ if(pages<=7||p===1||p===pages||Math.abs(p-currentPage)<=1){ pagination.appendChild(pageButton(String(p),p,false,p===currentPage)); } }
+      pagination.appendChild(pageButton("Next",currentPage+1,currentPage===pages,false));
+      table.querySelectorAll("th").forEach(function(h){
+        var hc=Number(h.dataset.column), on=hc===sortColumn, mark=h.querySelector(".sort-mark");
+        h.classList.toggle("sorted",on); if(mark) mark.textContent = on ? (sortDirection==="asc"?" ▲":" ▼") : "";
+      });
+    }
+    search.addEventListener("input",function(){ currentPage=1; render(); });
+    pageSize.addEventListener("change",function(){ currentPage=1; render(); });
+    table.querySelectorAll("th[data-column]").forEach(function(h){
+      h.addEventListener("click",function(){
+        var c=Number(h.dataset.column);
+        if(sortColumn===c){ sortDirection = sortDirection==="asc"?"desc":"asc"; } else { sortColumn=c; sortDirection="asc"; }
+        render();
+      });
+    });
+    render();
+  }());
+</script>
+{% endblock %}

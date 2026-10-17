@@ -1,0 +1,260 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <style>
+    .modem-tabs { display: flex; gap: 8px; margin: 0 0 20px; }
+    .modem-tab { padding: 10px 16px; border: 1px solid var(--border-color); cursor: pointer; background: var(--body-bg); }
+    .modem-tab.active { background: var(--primary); color: var(--header-link-color); }
+    .modem-panel { display: none; }
+    .modem-panel.active { display: block; }
+    .modem-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .port-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }
+    .port-card { border: 1px solid var(--border-color); border-radius: 4px; padding: 16px; background: var(--body-bg); }
+    .port-card h3 { margin-top: 0; }
+    .port-card dl { display: grid; grid-template-columns: 95px 1fr; gap: 6px; }
+    .port-card dt { font-weight: 700; }
+    .port-card dd { margin: 0; overflow-wrap: anywhere; }
+    .status-ok { color: #238636; font-weight: 700; }
+    .status-error { color: #ba2121; font-weight: 700; }
+    .connect-fields { display: grid; gap: 8px; margin-top: 14px; }
+    .connect-fields input, .connect-fields select { width: 100%; box-sizing: border-box; padding: 8px; }
+    .topup-card { max-width: 680px; border: 1px solid var(--border-color); border-radius: 4px; padding: 20px; }
+    .topup-fields { display: grid; grid-template-columns: 180px 1fr; gap: 14px; align-items: center; }
+    .topup-fields input:not([type="checkbox"]), .topup-fields select { width: 100%; box-sizing: border-box; padding: 9px; }
+    .topup-confirm { grid-column: 1 / -1; padding: 12px; background: var(--darkened-bg); }
+    .topup-submit { grid-column: 1 / -1; }
+    .ussd-preview { grid-column: 1 / -1; padding: 12px; border-left: 4px solid var(--primary); background: var(--darkened-bg); }
+    .data-table { width: 100%; border-collapse: collapse; }
+    .data-table th, .data-table td { padding: 10px; border-bottom: 1px solid var(--border-color); text-align: left; }
+  </style>
+{% endblock %}
+
+{% block content %}
+  <div class="modem-tabs" role="tablist">
+    <button class="modem-tab active" data-panel="detect-panel" type="button">Detect & Connect</button>
+    <button class="modem-tab" data-panel="topup-panel" type="button">Top Up</button>
+    <button class="modem-tab" data-panel="profiles-panel" type="button">Connected SIMs</button>
+    <button class="modem-tab" data-panel="transactions-panel" type="button">Transactions</button>
+  </div>
+
+  <section id="detect-panel" class="modem-panel active">
+    <div class="modem-toolbar">
+      <form method="post" action="{% url 'admin:topups_simprofile_scan' %}">
+        {% csrf_token %}
+        <button type="submit" class="button default">Scan modem ports</button>
+      </form>
+      <span>Scanning sends identification commands only. It does not dial USSD.</span>
+    </div>
+
+    {% if scan_results %}
+      <div class="port-grid">
+        {% for port in scan_results %}
+          <article class="port-card">
+            <h3>{{ port.device }} - {{ port.description|default:"Serial port" }}</h3>
+            {% if port.responsive %}
+              <p class="status-ok">AT modem detected</p>
+              <dl>
+                <dt>Operator</dt><dd>{{ port.operator_name|default:"Not registered / unknown" }}</dd>
+                <dt>SIM</dt><dd>{{ port.sim_status|default:"Unknown" }}</dd>
+                <dt>Signal</dt><dd>{{ port.signal|default:"Unknown" }}</dd>
+                <dt>Maker</dt><dd>{{ port.manufacturer|default:"Unknown" }}</dd>
+                <dt>Model</dt><dd>{{ port.model|default:"Unknown" }}</dd>
+                <dt>IMEI</dt><dd>{{ port.imei|default:"Unavailable" }}</dd>
+              </dl>
+
+              <form method="post" action="{% url 'admin:topups_simprofile_connect' %}" class="connect-fields">
+                {% csrf_token %}
+                <input type="hidden" name="port" value="{{ port.device }}">
+                <input type="text" name="name" placeholder="SIM profile name (optional)">
+                <select name="operator" required>
+                  <option value="">Select operator</option>
+                  <option value="grameenphone" {% if port.operator == "grameenphone" %}selected{% endif %}>Grameenphone</option>
+                  <option value="robi" {% if port.operator == "robi" %}selected{% endif %}>Robi</option>
+                  <option value="airtel" {% if port.operator == "airtel" %}selected{% endif %}>Airtel</option>
+                  <option value="banglalink" {% if port.operator == "banglalink" %}selected{% endif %}>Banglalink</option>
+                </select>
+                <input type="password" name="pin" inputmode="numeric" pattern="[0-9]{4,12}" placeholder="Flexiload PIN" required>
+                <button type="submit" class="button default">Connect {{ port.device }}</button>
+              </form>
+            {% else %}
+              <p class="status-error">Not an AT port</p>
+              <p>{{ port.error|default:"No modem response." }}</p>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p>No scan results yet. Connect the USB modem, wait for Windows to create its COM ports, then scan.</p>
+    {% endif %}
+  </section>
+
+  <section id="topup-panel" class="modem-panel">
+    <div class="topup-card">
+      <h2>Dial Flexiload USSD</h2>
+      {% if modem_backend == "serial" %}
+        <p class="status-ok">SERIAL MODE: submitting this form will dial the selected modem.</p>
+      {% else %}
+        <p class="status-error">MOCK MODE: requests are recorded but no real USSD is dialed. Restart Django with MODEM_BACKEND=serial for live top-ups.</p>
+      {% endif %}
+      <p>Select a connected SIM. The saved encrypted PIN is used unless you enter a replacement PIN.</p>
+      <form method="post" action="{% url 'admin:topups_simprofile_topup' %}" class="topup-fields" id="topup-form">
+        {% csrf_token %}
+        <label for="id_sim_profile">Connected SIM</label>
+        <select name="sim_profile" id="id_sim_profile" required>
+          <option value="">Select connected SIM</option>
+          {% for profile in connected_profiles %}
+            {% if profile.is_active %}
+              {% if profile.sim_number and profile.sim_verified_at %}
+                <option value="{{ profile.pk }}" data-operator="{{ profile.operator }}">
+                  {{ profile.sim_number }} - {{ profile.name }} - {{ profile.get_operator_display }} - {{ profile.port|default:"default port" }}
+                </option>
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+        </select>
+
+        <label for="id_product">Top-up type</label>
+        <select name="product" id="id_product" required>
+          <option value="">Select type</option>
+          <option value="flexiload">Flexiload</option>
+          <option value="offer">Offer</option>
+          <option value="postpaid">Postpaid</option>
+          <option value="prepaid">Prepaid</option>
+          <option value="regular">Regular</option>
+          <option value="skitto">Skitto</option>
+          <option value="topup">Top-up</option>
+        </select>
+
+        <label for="id_phone_number">Mobile number</label>
+        <input id="id_phone_number" name="phone_number" type="tel" inputmode="numeric" pattern="(?:\+?88)?01[3-9][0-9]{8}" placeholder="01712345678" required>
+
+        <label for="id_amount">Amount</label>
+        <input id="id_amount" name="amount" type="number" min="1" max="100000" step="0.01" placeholder="50.00" required>
+
+        <label for="id_pin">PIN override</label>
+        <input id="id_pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,12}" placeholder="Leave blank to use saved PIN">
+
+        <div class="ussd-preview" id="ussd-preview">Select a SIM and type to preview the command. The PIN remains hidden.</div>
+
+        <label class="topup-confirm">
+          <input name="confirm" type="checkbox" required>
+          I confirm this top-up and understand it will dial the USSD command.
+        </label>
+
+        <button type="submit" class="button default topup-submit">Dial USSD and submit top-up</button>
+      </form>
+    </div>
+  </section>
+
+  <section id="profiles-panel" class="modem-panel">
+    <p><a class="addlink" href="{% url 'admin:topups_simprofile_add' %}">Add SIM profile manually</a></p>
+    <table class="data-table">
+      <thead><tr><th>Name</th><th>SIM number</th><th>Owner</th><th>Operator</th><th>Port</th><th>Verified</th><th>Active</th><th>Action</th></tr></thead>
+      <tbody>
+        {% for profile in connected_profiles %}
+          <tr>
+            <td><a href="{% url 'admin:topups_simprofile_change' profile.pk %}">{{ profile.name }}</a></td>
+            <td>
+              {% if profile.sim_number %}
+                <strong>{{ profile.sim_number }}</strong>
+              {% else %}
+                <span class="status-error">Not verified</span>
+              {% endif %}
+            </td>
+            <td>{{ profile.owner }}</td>
+            <td>{{ profile.get_operator_display }}</td>
+            <td>{{ profile.port|default:"Default" }}</td>
+            <td>{{ profile.sim_verified_at|default:"Never" }}</td>
+            <td>{{ profile.is_active|yesno:"Yes,No" }}</td>
+            <td>
+              <form method="post" action="{% url 'admin:topups_simprofile_verify' profile.pk %}">
+                {% csrf_token %}
+                <button type="submit" class="button">Check SIM number</button>
+              </form>
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="8">No connected SIM profiles.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section id="transactions-panel" class="modem-panel">
+    <p><a href="{% url 'admin:topups_topuptransaction_changelist' %}">Open complete transaction history</a></p>
+    <table class="data-table">
+      <thead><tr><th>Time</th><th>User</th><th>SIM</th><th>Number</th><th>Amount</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for transaction in recent_transactions %}
+          <tr>
+            <td><a href="{% url 'admin:topups_topuptransaction_change' transaction.pk %}">{{ transaction.created_at }}</a></td>
+            <td>{{ transaction.user }}</td>
+            <td>{{ transaction.sim_profile }}</td>
+            <td>{{ transaction.phone_number }}</td>
+            <td>{{ transaction.amount }}</td>
+            <td>{{ transaction.get_status_display }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="6">No transactions yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endblock %}
+
+{% block footer %}
+  {{ block.super }}
+  <script>
+    document.querySelectorAll(".modem-tab").forEach(function (tab) {
+      tab.addEventListener("click", function () {
+        document.querySelectorAll(".modem-tab, .modem-panel").forEach(function (item) {
+          item.classList.remove("active");
+        });
+        tab.classList.add("active");
+        document.getElementById(tab.dataset.panel).classList.add("active");
+      });
+    });
+
+    const templates = {
+      grameenphone: {
+        default: "*444*0*{number}*{amount}*••••#",
+        skitto: "*666*{number}*{amount}*••••#"
+      },
+      robi: { default: "*888*{number}*{amount}*••••#" },
+      airtel: { default: "*888*{number}*{amount}*••••#" },
+      banglalink: { default: "*555*{number}*{amount}*••••#" }
+    };
+    const sim = document.getElementById("id_sim_profile");
+    const product = document.getElementById("id_product");
+    const number = document.getElementById("id_phone_number");
+    const amount = document.getElementById("id_amount");
+    const preview = document.getElementById("ussd-preview");
+
+    function updateTopupForm() {
+      const selected = sim.options[sim.selectedIndex];
+      const operator = selected ? selected.dataset.operator : "";
+      Array.from(product.options).forEach(function (option) {
+        option.hidden = option.value === "skitto" && operator !== "grameenphone";
+      });
+      if (product.value === "skitto" && operator !== "grameenphone") {
+        product.value = "";
+      }
+      if (!operator || !templates[operator]) {
+        preview.textContent = "Select a connected SIM to preview the USSD command.";
+        return;
+      }
+      const template = product.value === "skitto"
+        ? templates[operator].skitto
+        : templates[operator].default;
+      preview.textContent = (template || "")
+        .replace("{number}", number.value || "{number}")
+        .replace("{amount}", amount.value || "{amount}");
+    }
+    [sim, product, number, amount].forEach(function (field) {
+      field.addEventListener("input", updateTopupForm);
+      field.addEventListener("change", updateTopupForm);
+    });
+  </script>
+{% endblock %}

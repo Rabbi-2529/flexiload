@@ -1,0 +1,209 @@
+```html
+{% extends "dashboard/base.html" %}
+
+{% block title %}
+  API Documentation | Flexiload Control
+{% endblock %}
+
+{% block heading %}API documentation{% endblock %}
+
+{% block content %}
+  <section class="panel docs">
+    <h2>Authentication</h2>
+
+    <p>
+      Base URL:
+      <code>{{ request.scheme }}://{{ request.get_host }}/api/</code>
+    </p>
+
+    <h3>Login and obtain a token</h3>
+
+    <div class="endpoint">
+      <span class="method post">POST</span>
+      <code>/api/auth/login/</code>
+    </div>
+
+    <pre class="code-box">{
+  "email": "operator@example.com",
+  "password": "your-password"
+}</pre>
+
+    <p>Use the returned token on every protected request:</p>
+
+    <pre class="code-box">Authorization: Token YOUR_TOKEN</pre>
+
+    <h2>Send a top-up</h2>
+
+    <div class="endpoint">
+      <span class="method post">POST</span>
+      <code>/api/transactions/send/</code>
+    </div>
+
+    <pre class="code-box">{
+  "sim_profile_id": 1,
+  "product": "flexiload",
+  "phone_number": "01712345678",
+  "amount": 50,
+  "idempotency_key": "order-2026-0001",
+  "retry_failed": true
+}</pre>
+
+    <p>
+      Products:
+      <code>flexiload</code>,
+      <code>offer</code>,
+      <code>postpaid</code>,
+      <code>prepaid</code>,
+      <code>regular</code>,
+      <code>topup</code>,
+      and GP-only <code>skitto</code>.
+    </p>
+
+    <p>
+      The optional write-only <code>pin</code> replaces the encrypted
+      PIN saved for the selected SIM.
+    </p>
+
+    <h3>Idempotency and automatic retry</h3>
+
+    <p>
+      Use the Laravel <code>sms_id</code> as the
+      <code>idempotency_key</code>. Do not generate a new key for a
+      retry.
+    </p>
+
+    <p>
+      Sending <code>retry_failed: true</code> has these effects:
+    </p>
+
+    <ul>
+      <li>A new idempotency key creates a new transaction.</li>
+      <li>An existing failed transaction is executed again.</li>
+      <li>
+        Existing processing or successful transactions are returned
+        without dialing again.
+      </li>
+    </ul>
+
+    <h3>Retry using the transaction UUID</h3>
+
+    <div class="endpoint">
+      <span class="method post">POST</span>
+      <code>/api/transactions/{uuid}/retry/</code>
+    </div>
+
+    <p>
+      No request body is required. This endpoint uses the original
+      SIM, number, amount, product and idempotency key.
+    </p>
+
+    <pre class="code-box">Authorization: Token YOUR_TOKEN
+Content-Type: application/json</pre>
+
+    <h3>Top-up response</h3>
+
+    <pre class="code-box">{
+  "id": "transaction-uuid",
+  "username": "operator",
+  "sim_profile": 1,
+  "sim_profile_name": "Grameenphone COM48",
+  "source_sim_number": "01XXXXXXXXX",
+  "operator": "grameenphone",
+  "product": "flexiload",
+  "phone_number": "01712345678",
+  "targeted_number": "01712345678",
+  "amount": 50,
+  "status": "success",
+  "carrier_transaction_id": "BD110626173726104179",
+  "message": "Recharge of 50.00 BDT is successful.",
+  "modem_response": "+CUSD: 2,\"Complete carrier message\",15",
+  "error_message": "",
+  "idempotency_key": "order-2026-0001",
+  "retry_count": 1,
+  "last_retried_at": "2026-06-30T12:00:00+06:00",
+  "created_at": "2026-06-30T11:55:00+06:00",
+  "completed_at": "2026-06-30T12:00:10+06:00"
+}</pre>
+
+    <h3>Transaction statuses</h3>
+
+    <ul>
+      <li><code>pending</code> — waiting to be processed.</li>
+      <li>
+        <code>processing</code> — accepted and waiting for carrier SMS.
+      </li>
+      <li><code>success</code> — carrier confirmed the recharge.</li>
+      <li><code>failed</code> — carrier or modem rejected the request.</li>
+    </ul>
+
+    <h2>Transaction history</h2>
+
+    <div class="endpoint">
+      <span class="method get">GET</span>
+      <code>/api/transactions/</code>
+    </div>
+
+    <p>
+      Returns paginated transaction history. Use
+      <code>?page=2</code> for later pages.
+    </p>
+
+    <div class="endpoint">
+      <span class="method get">GET</span>
+      <code>/api/transactions/{uuid}/</code>
+    </div>
+
+    <p>History responses include:</p>
+
+    <ul>
+      <li><code>carrier_transaction_id</code></li>
+      <li><code>message</code></li>
+      <li><code>targeted_number</code></li>
+      <li><code>modem_response</code></li>
+      <li><code>error_message</code></li>
+      <li><code>retry_count</code></li>
+      <li><code>last_retried_at</code></li>
+    </ul>
+
+    <h2>SIM profiles</h2>
+
+    <div class="endpoint">
+      <span class="method get">GET</span>
+      <code>/api/sim-profiles/</code>
+    </div>
+
+    <div class="endpoint">
+      <span class="method post">POST</span>
+      <code>/api/sim-profiles/</code>
+    </div>
+
+    <pre class="code-box">{
+  "name": "Counter GP",
+  "operator": "grameenphone",
+  "port": "COM48",
+  "pin": "1234",
+  "is_active": true
+}</pre>
+
+    <h2>cURL examples</h2>
+
+    <h3>Send or retry with the same idempotency key</h3>
+
+    <pre class="code-box">curl -X POST "{{ request.scheme }}://{{ request.get_host }}/api/transactions/send/" \
+  -H "Authorization: Token YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"sim_profile_id\":1,\"product\":\"flexiload\",\"phone_number\":\"01712345678\",\"amount\":50,\"idempotency_key\":\"order-2026-0001\",\"retry_failed\":true}"</pre>
+
+    <h3>Retry using transaction UUID</h3>
+
+    <pre class="code-box">curl -X POST "{{ request.scheme }}://{{ request.get_host }}/api/transactions/TRANSACTION_UUID/retry/" \
+  -H "Authorization: Token YOUR_TOKEN" \
+  -H "Content-Type: application/json"</pre>
+
+    <h3>Get transaction history</h3>
+
+    <pre class="code-box">curl "{{ request.scheme }}://{{ request.get_host }}/api/transactions/" \
+  -H "Authorization: Token YOUR_TOKEN"</pre>
+  </section>
+{% endblock %}
+```

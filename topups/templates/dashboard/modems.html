@@ -1,0 +1,113 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Modems & SIMs | Flexiload Control{% endblock %}
+{% block heading %}Modems & SIMs{% endblock %}
+{% block header_action %}
+  <form method="post" action="{% url 'dashboard:scan_modems' %}">
+    {% csrf_token %}
+    <button class="btn primary" type="submit">Scan COM ports</button>
+  </form>
+{% endblock %}
+{% block content %}
+  <div class="mode-banner {% if modem_backend == 'serial' %}live{% else %}mock{% endif %}">
+    Backend: <strong>{{ modem_backend|upper }}</strong>. Scanning uses identification commands only.
+  </div>
+  <section class="panel">
+    <div class="panel-header"><h2>Detected ports</h2><span class="muted">{{ scan_results|length }} result{{ scan_results|length|pluralize }}</span></div>
+    <div class="card-grid">
+      {% for port in scan_results %}
+        <article class="modem-card">
+          <div class="card-title">
+            <div><h3>{{ port.device }}</h3><p>{{ port.description }}</p></div>
+            <span class="badge {% if port.responsive %}success{% else %}failed{% endif %}">{% if port.responsive %}AT ready{% else %}Unavailable{% endif %}</span>
+          </div>
+          {% if port.responsive %}
+            <dl class="details">
+              <dt>Network</dt><dd>{{ port.operator_name|default:"Unknown" }}</dd>
+              <dt>SIM state</dt><dd>{{ port.sim_status|default:"Unknown" }}</dd>
+              <dt>Signal</dt><dd>{{ port.signal|default:"Unknown" }}</dd>
+              <dt>Model</dt><dd>{{ port.manufacturer }} {{ port.model }}</dd>
+              <dt>IMEI</dt><dd>{{ port.imei|default:"Unavailable" }}</dd>
+            </dl>
+            <form method="post" action="{% url 'dashboard:connect_modem' %}" class="stack-form compact">
+              {% csrf_token %}
+              <input type="hidden" name="port" value="{{ port.device }}">
+              <input type="text" name="name" placeholder="Profile name">
+              <select name="operator" required>
+  <option value="">Select operator</option>
+
+  <option
+    value="grameenphone"
+    {% if port.operator == "grameenphone" %}selected{% endif %}
+  >
+    Grameenphone
+  </option>
+
+  <option
+    value="robi"
+    {% if port.operator == "robi" %}selected{% endif %}
+  >
+    Robi
+  </option>
+
+  <option
+    value="airtel"
+    {% if port.operator == "airtel" %}selected{% endif %}
+  >
+    Airtel
+  </option>
+
+  <option
+    value="banglalink"
+    {% if port.operator == "banglalink" %}selected{% endif %}
+  >
+    Banglalink
+  </option>
+
+  <option
+    value="teletalk"
+    {% if port.operator == "teletalk" %}selected{% endif %}
+  >
+    Teletalk
+  </option>
+</select>
+              <input type="password" name="pin" inputmode="numeric" pattern="[0-9]{4,12}" placeholder="Flexiload PIN" required>
+              <button class="btn primary" type="submit">Verify and connect</button>
+            </form>
+          {% else %}
+            <pre class="response-box error">{{ port.error|default:"No AT response" }}</pre>
+          {% endif %}
+        </article>
+      {% empty %}
+        <p class="empty">No scan results. Connect the modem and click Scan COM ports.</p>
+      {% endfor %}
+    </div>
+  </section>
+  <section class="panel">
+    <div class="panel-header"><h2>Saved SIM connections</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>SIM number</th><th>Operator</th><th>Port</th><th>Verified</th><th>State</th><th></th></tr></thead>
+        <tbody>
+          {% for profile in profiles %}
+            <tr>
+              <td>{{ profile.name }}</td>
+              <td><strong>{{ profile.sim_number|default:"Not verified" }}</strong></td>
+              <td>{{ profile.get_operator_display }}</td>
+              <td>{{ profile.port }}</td>
+              <td>{{ profile.sim_verified_at|date:"Y-m-d H:i:s"|default:"Never" }}</td>
+              <td><span class="badge {% if profile.is_active %}success{% else %}failed{% endif %}">{% if profile.is_active %}Active{% else %}Disabled{% endif %}</span></td>
+              <td>
+                <form method="post" action="{% url 'dashboard:verify_modem' profile.pk %}">
+                  {% csrf_token %}
+                  <button class="btn small" type="submit">Recheck number</button>
+                </form>
+              </td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="7" class="empty">No saved SIM connections.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

@@ -1,0 +1,2117 @@
+<?php
+
+namespace App\Http\Controllers\User\Flexiload;
+
+use Illuminate\Http\Request;
+use App\Http\Controllers\Controller;
+use App\Model\LoadCampaign30day;
+use App\Model\LoadCampaign;
+use App\Model\Operator;
+use App\Model\User;
+use App\Model\LoadPackage;
+use App\Model\LoadFlexibooksData;
+use App\Model\LoadCamPending;
+use App\Model\LoadCampaignId;
+use Carbon\Carbon;
+use Importer;
+use PDF;
+use DB;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Input;
+use stdClass;
+use GuzzleHttp\Client;
+use Illuminate\Support\Facades\Response;
+use App\Helpers\BalanceHelper;
+use App\Helpers\PhoneNumber;
+use App\Helpers\FileRead;
+use Illuminate\Support\Facades\Log;
+
+class LoadController extends Controller
+{
+    public function flexiloadFormView()
+    {
+        return view('user.flexiload.flexiloadForm');
+    }
+
+    // Single load
+    // Single load
+    // Single load
+    // Single load
+    public function flexiloadFormProcess(Request $request)
+    {
+        // dd($request->all());
+        $validated_data = $request->validate([
+            'amount' => 'required|integer|min:10|max:50000',
+            'number_type' => 'required',
+            'targeted_number' => 'required',
+            'flexipin' => 'required',
+        ]);
+
+
+        try {
+            $flexipin = $request->flexipin;
+            $targeted_number = $request->targeted_number;
+            $operator = $request->operator;
+            $targeted_number = PhoneNumber::addNumberPrefix($targeted_number);
+            $number_type = $request->number_type;
+            $campaign_id = random_int(10, 90) . time() . random_int(1, 9);
+            $remarks = $request->remarks;
+
+
+            if (!PhoneNumber::isValid($targeted_number)) {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Invalid Number']);
+            }
+
+            $user = auth()->user();
+            $user_balance = BalanceHelper::user_available_balance($user->id);
+            $flexiload_price = $request->amount;
+
+            if($operator == 'airtel'){
+                $op_id = 1;
+            } else if($operator == 'blink'){
+                $op_id = 2;
+            } else if($operator == 'gp'){
+                $op_id = 3;   
+            } else if($operator == 'robi'){
+                $op_id = 4;
+            } else{
+                $op_id = 5;
+            }
+
+            $amount = array();
+            if ( ((($operator == 'robi' || $operator =='airtel' || $operator =='teletalk') && ($number_type == 1 || $number_type == 2)) || (($operator == 'gp' || $operator =='blink') && $number_type == 1)) && $flexiload_price > 1000) {
+                $amount[] = $flexiload_price;
+                foreach($amount as $val){
+                    $res = $val;
+                    $limit = array();
+                    while($res > 1000){
+                        if(abs($res) > 1000){
+                            $limit[] = 1000;
+                            $res -= 1000;
+                            if(abs($res) > 900){
+                                $limit[] = 900;
+                                $res -= 900;
+                                if(abs($res) > 800){
+                                    $limit[] = 800;
+                                    $res -= 800;
+                                    if(abs($res) > 700){
+                                        $limit[] = 700;
+                                        $res -= 700;
+                                        if(abs($res) > 600){
+                                            $limit[] = 600;
+                                            $res -= 600;
+                                            if(abs($res) > 500){
+                                                $limit[] = 500;
+                                                $res -= 500;
+                                                if(abs($res) > 400){
+                                                    $limit[] = 400;
+                                                    $res -= 400;
+                                                    if(abs($res) > 300){
+                                                        $limit[] = 300;
+                                                        $res -= 300;
+                                                        if(abs($res) > 200){
+                                                            $limit[] = 200;
+                                                            $res -= 200;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }    
+                            }           
+                        }
+                    }
+                    $limit[] = $res;
+                }
+
+                // dd($limit);
+
+            }else{
+                $limit[] = $flexiload_price;
+                // dd($limit);
+            }
+    
+            $package = LoadPackage::where('operator_id', $op_id)->where('package_price', $flexiload_price)->first();
+            if(!empty($package)){
+                $package_id = $package->id;
+            }else{
+                $package_id = 0;
+            }
+            // Checking flexipin
+            if ($user->flexipin != $flexipin) {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Wrong Flexipin !']);
+            }
+
+            // Checking available balance
+            $eligible_amount = $user->flexiload_limit + $flexiload_price;
+            if ($eligible_amount >= $user_balance) {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Insufficient balance !']);
+            }
+
+            if (BalanceHelper::check_flexiload_parent_available_balance($user->id, $flexiload_price)) {
+
+                DB::beginTransaction();
+
+                for ($count = 0; $count < count($limit); $count++) {
+                $load_campaign = new LoadCamPending();
+                $load_campaign->user_id = $user->id;
+                $load_campaign = $this->setUniqueSmsId($load_campaign);
+                if ($request->operator != '') {
+                $load_campaign->operator_id = $request->operator;
+                }else {
+                    $load_campaign->operator_id = PhoneNumber::getOperatorNameForLoadByNumber($targeted_number);
+                }
+                $load_campaign->campaign_id = $campaign_id;
+                $load_campaign->targeted_number = $targeted_number;
+                $load_campaign->owner_name = $request->dynamic_name_column ?? '';
+                $load_campaign->package_id = $package_id;
+                $load_campaign->number_type = $number_type;
+                $load_campaign->campaign_type = '1'; // Single Flexiload
+                $load_campaign->campaign_price = $limit[$count];
+                $load_campaign->remarks = $remarks;
+
+                $load_campaign->status = '0';
+                // dd($load_campaign);
+                $load_campaign->save();
+                }
+
+                // Insert to load campaign ID table
+                $campaign = new LoadCampaignId();
+                $campaign->user_id = auth()->id();
+                $campaign->campaign_id = $campaign_id;
+                $campaign->campaign_name = $request->campaign_name ?? '';
+                $campaign->total_number = 1;
+                $campaign->total_amount = $flexiload_price;
+                $campaign->save();
+
+
+
+                /*debit user balance*/
+                $user_position = $user->position;
+                $user_id = $user->id;
+
+                $user_det = User::where('id', $user_id)->first();
+                $current_date = Carbon::now();
+                while ($user_position >= 1 && $user_det) {
+                    /*get total cost against each reseller*/
+                    $price_after_commission = $flexiload_price - (($flexiload_price * $user_det->flexiload_commission) / 100);
+
+                    BalanceHelper::addDebit(
+                        $user_det->create_by,
+                        $user_det->id,
+                        $campaign_id,
+                        $price_after_commission,
+                        5,
+                        1,
+                        2,
+                        $current_date,
+                        0
+                    );
+                    $user_det = User::where('id', $user_det->create_by)->first();
+                    if ($user_det) {
+                        $user_position = $user_det->position;
+                    } else {
+                        break;
+                    }
+                }
+                DB::commit();
+
+            } else {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Its seems you have a insufficient balance.Please contact with your reseller.']);
+            }
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return redirect()->back()->with(['type' => 'danger', 'message' => 'Something is going Wrong' . $e->getMessage()]);
+        }
+        return redirect()->back()->with(['type' => 'success', 'message' => 'Successfully flexiloaded ' . $flexiload_price . ' Tk to ' . $targeted_number]);
+    }
+
+    public function checkDynamicFile(Request $request)
+    {
+
+        $file = $request->file('sms_file');
+        if (empty($file)) {
+            $res = new stdClass();
+            $res->error = 'Please select a file...!';
+            die(json_encode($res));
+        } else {
+            $filename = $request->file('sms_file')->getClientOriginalName();
+
+            $fileType = FileRead::getFileType($filename);
+            $allContacts = array();
+            try {
+                if ($fileType == "Excel") {
+                    $fileContents = Importer::make('Excel')->load($file)->getCollection();
+                    foreach ($fileContents as $fileContent) {
+                        $allContacts[] = $fileContent[0];
+                    }
+                } else {
+                    $res = new stdClass();
+                    $res->error = 'Only excel file are allowed for dynamic sms...!';
+                    die(json_encode($res));
+                }
+            } catch (\Exception $e) {
+                $res = new stdClass();
+                $res->error = 'Something went wrong to upload file. contact with admin';
+                die(json_encode($res));
+            }
+
+            /*$validNumbers = array();
+            foreach ($allContacts as $contact) {
+                $number = PhoneNumber::addNumberPrefix($contact);
+                if (PhoneNumber::isValid($number)) {
+                    $validNumbers[] = $number;
+                }
+            }*/
+
+            foreach ($fileContents as $fileContent) {
+                foreach ($fileContent as $content) {
+                    $columns[] = $content;
+                }
+                break;
+            }
+
+            $res = new stdClass();
+            $res->columns = $columns;
+            die(json_encode($res));
+
+        }
+    }
+
+
+
+// Flexibook from a flexibook
+// Flexibook from a flexibook
+// Flexibook from a flexibook
+// Flexibook from a flexibook
+    public function flexiload_book(Request $request)
+    {
+
+        $validated_data = $request->validate([
+            'flexipin' => 'required',
+            'flexibook_id' => 'required',
+        ]);
+
+
+        $book_id = $request->flexibook_id;
+        $user = auth()->user();
+        $flexipin = $request->flexipin;
+
+        // Checking flexipin
+        if ($user->flexipin != $flexipin) {
+            return redirect()->back()->with(['type' => 'danger', 'message' => 'Wrong Flexipin !']);
+        }
+
+        $allContacts = LoadFlexibooksData::where('load_flexibooks_id', $book_id)
+            ->where('status', '1')
+            ->get();
+
+        if (isset($request->customize_amount)) {
+            if(($request->customize_amount <10) || ($request->customize_amount > 50000)) {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Amount must be in 10 to 50000 taka']);
+            }
+            $customized_price = $request->customize_amount;
+            $flexiload_total_cost = $request->customize_amount * count($allContacts);
+        } else {
+            $flexiload_total_cost = $allContacts->sum('amount');
+        }
+
+
+        $user_balance = BalanceHelper::user_available_balance($user->id);
+        $eligible_amount = $user->flexiload_limit + $flexiload_total_cost;
+
+        if ($eligible_amount >= $user_balance) {
+            return redirect()->back()->with(['type' => 'danger', 'message' => 'Insufficient balance !']);
+        }
+
+        if (BalanceHelper::check_flexiload_parent_available_balance($user->id, $flexiload_total_cost)) {
+            $campaign_id = random_int(10, 90) . time() . random_int(1, 9);
+            try {
+                DB::beginTransaction();
+
+
+                $total_amount = 0;
+                foreach ($allContacts as $contact) {
+                    $load_campaign = new LoadCamPending();
+                    $load_campaign->user_id = $user->id;
+                    $load_campaign = $this->setUniqueSmsId($load_campaign);
+                    if ($contact->operator != '') {
+                        $load_campaign->operator_id = $contact->operator;
+                    }else{
+                        $load_campaign->operator_id = PhoneNumber::getOperatorNameForLoadByNumber($contact->number);
+                    }
+                    $load_campaign->campaign_id = $campaign_id;
+                    $load_campaign->targeted_number = $contact->number;
+                    $load_campaign->owner_name = $contact->name;
+                    $load_campaign->package_id = $package_id ?? '0';
+                    $load_campaign->number_type = $contact->number_type;
+                    $load_campaign->campaign_type = '1'; //
+
+                    $amount_aux = isset($customized_price) ? $customized_price : $contact->amount;
+
+                    $load_campaign->campaign_price = $amount_aux;
+                    $load_campaign->remarks = $contact->remarks;
+
+                    $load_campaign->status = '0';
+
+                    $load_campaign->save();
+
+                    $total_amount += $amount_aux;
+                }
+
+                // Insert to load campaign ID table
+                $campaign = new LoadCampaignId();
+                $campaign->user_id = auth()->id();
+                $campaign->campaign_id = $campaign_id;
+                $campaign->campaign_name = $request->campaign_name ?? '';
+                $campaign->total_number = count($allContacts);
+                $campaign->total_amount = $total_amount;
+
+                $campaign->save();
+
+                /*debit user balance*/
+                $user_position = $user->position;
+                $user_id = $user->id;
+
+                $user_det = User::where('id', $user_id)->first();
+                $current_date = Carbon::now();
+                while ($user_position >= 1 && $user_det) {
+                    /*get total cost against each reseller*/
+                    $price_after_commission = $flexiload_total_cost - (($flexiload_total_cost * $user_det->flexiload_commission) / 100);
+
+                    BalanceHelper::addDebit(
+                        $user_det->create_by,
+                        $user_det->id,
+                        $campaign_id,
+                        $price_after_commission,
+                        5,
+                        1,
+                        2,
+                        $current_date,
+                        0
+                    );
+                    $user_det = User::where('id', $user_det->create_by)->first();
+                    if ($user_det) {
+                        $user_position = $user_det->position;
+                    } else {
+                        break;
+                    }
+                }
+
+            } catch (\Exception $e) {
+                DB::rollback();
+                dd($e->getMessage());
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Something wrong ' . $e]);
+            }
+            Db::commit();
+        } else {
+            return redirect()->back()->with(['type' => 'danger', 'message' => 'In Sufficient Balance']);
+        }
+        return redirect()->back()->with(['type' => 'success', 'message' => 'Success']);
+
+    }
+
+
+    /*
+        * Package flexiload processing
+        * Inserting after checking after all validation load_cam_pending table
+    */
+    public function packageFormProcess(Request $request)
+    {
+        $validated_data = $request->validate([
+            'package_id' => 'required',
+            'number_type' => 'required',
+            'targeted_number' => 'required',
+            'flexipin' => 'required',
+        ]);
+
+
+        try {
+            $flexipin = $request->flexipin;
+            $package_id = $request->package_id;
+            $targeted_number = $request->targeted_number;
+            $targeted_number = PhoneNumber::addNumberPrefix($targeted_number);
+            $number_type = $request->number_type;
+            $campaign_id = random_int(10, 90) . time() . random_int(1, 9);
+            $remarks = $request->remarks;
+
+            $op = PhoneNumber::checkOperator($targeted_number)->id;
+
+            if (!PhoneNumber::isValid($targeted_number)) {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Invalid Number', 'op' => $op]);
+            }
+
+            $user = auth()->user();
+            $user_balance = BalanceHelper::user_available_balance($user->id);
+            $flexiload_price = LoadPackage::where('id', $package_id)->first()->package_price;
+
+            // Checking flexipin
+            if ($user->flexipin != $flexipin) {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Wrong Flexipin !', 'op' => $op]);
+            }
+
+            // Checking available balance
+            // $eligible_amount = $user->flexiload_limit + $flexiload_price;
+            if ($flexiload_price >= $user_balance) {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Insufficient balance !', 'op' => $op]);
+            }
+
+
+            if (BalanceHelper::check_flexiload_parent_available_balance($user->id, $flexiload_price)) {
+                DB::beginTransaction();
+
+
+                $load_campaign = new LoadCamPending();
+                $load_campaign = $this->setUniqueSmsId($load_campaign);
+                $load_campaign->user_id = $user->id;
+                if ($request->operator != '') {
+                $load_campaign->operator_id = $request->operator;
+                }else {
+                    $load_campaign->operator_id = PhoneNumber::getOperatorNameForLoadByNumber($targeted_number);
+                }
+                $load_campaign->campaign_id = $campaign_id;
+                $load_campaign->targeted_number = $targeted_number;
+                $load_campaign->owner_name = $request->dynamic_name_column ?? '';
+                $load_campaign->package_id = $package_id;
+                $load_campaign->number_type = $number_type;
+                $load_campaign->campaign_type = '2'; //Package
+                $load_campaign->campaign_price = $flexiload_price;
+                $load_campaign->remarks = $remarks;
+                $load_campaign->status = '0';
+
+                $load_campaign->save();
+
+                // Insert to load campaign ID table
+                $campaign = new LoadCampaignId();
+                $campaign->user_id = auth()->id();
+                $campaign->campaign_id = $campaign_id;
+                $campaign->campaign_name = $request->campaign_name ?? '';
+                $campaign->total_number = 1;
+                $campaign->total_amount = $flexiload_price;
+
+                $campaign->save();
+
+
+                /*debit user balance*/
+                $user_position = $user->position;
+                $user_id = $user->id;
+
+                $user_det = User::where('id', $user_id)->first();
+                $current_date = Carbon::now();
+                while ($user_position >= 1 && $user_det) {
+                    /*get total cost against each reseller*/
+                    $price_after_commission = $flexiload_price - (($flexiload_price * $user_det->flexiload_commission) / 100);
+
+                    BalanceHelper::addDebit(
+                        $user_det->create_by,
+                        $user_det->id,
+                        $campaign_id,
+                        $price_after_commission,
+                        5,
+                        1,
+                        2,
+                        $current_date,
+                        0
+                    );
+                    $user_det = User::where('id', $user_det->create_by)->first();
+                    if ($user_det) {
+                        $user_position = $user_det->position;
+                    } else {
+                        break;
+                    }
+                }
+                DB::commit();
+
+            } else {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Its seems you have a insufficient balance.Please contact with your reseller.', 'op' => $op]);
+            }
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return redirect()->back()->with(['type' => 'danger', 'message' => 'Something is going Wrong', 'op' => $op]);
+        }
+        return redirect()->back()->with(['type' => 'success', 'message' => 'Successfully flexiloaded ' . $flexiload_price . ' Tk to ' . $targeted_number, 'op' => $op]);
+    }
+
+
+    public function bulkLoadForm()
+    {
+        return view('user.flexiload.bulkLoadForm');
+    }
+
+    /*
+        * Bulk Flexiload Processing starts
+
+    */
+    public function bulkLoadFormProcess(Request $request)
+    {
+
+        $validateData = Validator::make($request->all(), [
+            'sms_file' => 'required',
+            'dynamic_name_column' => 'required',
+            'dynamic_number_column' => 'required',
+            'dynamic_amount_column' => 'required',
+            'dynamic_number_type_column' => 'required',
+            'dynamic_number_operator_column' => 'required',
+            'flexipin' => 'required',
+        ]);
+
+        if ($validateData->fails()) {
+            return redirect()->back()->withErrors($validateData)->withInput();
+        }
+
+        $remarks = $request->remarks;
+
+
+        $user = auth()->user();
+        $flexipin = $request->flexipin;
+
+        // Checking flexipin
+        if ($user->flexipin != $flexipin) {
+            return redirect()->back()->with(['type' => 'danger', 'message' => 'Wrong Flexipin !']);
+        }
+
+        $dynamic_name_column = $request->dynamic_name_column - 1;
+        $dynamic_number_column = $request->dynamic_number_column - 1;
+        $dynamic_amount_column = $request->dynamic_amount_column - 1;
+        $dynamic_number_type_column = $request->dynamic_number_type_column - 1;
+        $dynamic_number_operator_column = $request->dynamic_number_operator_column - 1;
+        $remarks = $request->remarks;
+
+
+        $file = Input::file('sms_file');
+        $filename = $request->file('sms_file')->getClientOriginalName();
+
+        $fileType = FileRead::getFileType($filename);
+        $allName1 = array();
+        $allContacts1 = array();
+        $allAmount1 = array();
+        $allNumberTypes1 = array();
+        $allOperator1 = array();
+
+        $allName = array();
+        $allContacts = array();
+        $allAmount = array();
+        $allNumberTypes = array();
+        $allOperator = array();
+        $validOperator = [
+            'airtel',
+            'robi',
+            'gp',
+            'teletalk',
+            'blink',
+            'gpst'
+        ];
+       if ($fileType == "Excel") {
+    $fileContents = Importer::make('Excel')->load($file)->getCollection();
+    $f = 0;
+
+    foreach ($fileContents as $fileContent) {
+        // CRITICAL FIX: Check if the row has at least 4 columns
+        // Since we need indices 0, 1, 2, 3 (A, B, C, D)
+        if (count($fileContent) < 4) {
+            continue; // Skip rows with insufficient columns
+        }
+
+        // Safely extract data using isset() to prevent undefined offset errors
+        $name = isset($fileContent[$dynamic_name_column]) ? (string)$fileContent[$dynamic_name_column] : '';
+        $number = isset($fileContent[$dynamic_number_column]) ? (string)$fileContent[$dynamic_number_column] : '';
+        $amount = isset($fileContent[$dynamic_amount_column]) ? (int)$fileContent[$dynamic_amount_column] : 0;
+        $numberType = isset($fileContent[$dynamic_number_type_column]) ? (int)$fileContent[$dynamic_number_type_column] : 1;
+        $operator = isset($fileContent[$dynamic_number_operator_column]) ? (string)$fileContent[$dynamic_number_operator_column] : '';
+
+        // Skip if number is empty or amount is invalid
+        if (empty($number) || $amount < 10 || $amount > 50000) {
+            continue;
+        }
+
+        if ($numberType < 1 || $numberType > 3) {
+            continue;
+        }
+
+        $allName1[$f] = $name;
+        $allContacts1[$f] = PhoneNumber::addNumberPrefix((string)(abs((int)$number)));
+        $allAmount1[$f] = $amount;
+        $allNumberTypes1[$f] = $numberType;
+        $allOperator1[$f] = $operator;
+        $f++;
+    }
+
+    // If no valid rows were found, return error
+    if (empty($allContacts1)) {
+        return redirect()->back()->with(['type' => 'danger', 'message' => 'No valid data found in the Excel file.']);
+    }
+
+    // Continue with your existing logic...
+    $kz = 0;
+            for ($iz = 0; $iz < count($allContacts1); $iz++) {
+                $amount = array();
+                if (((in_array($allOperator1[$iz],['robi']) || in_array($allOperator1[$iz],['airtel']) ||in_array($allOperator1[$iz],['teletalk'])) && ($allNumberTypes1[$iz] == 1 || $allNumberTypes1[$iz] == 2)) || ((in_array($allOperator1[$iz],['gp']) || in_array($allOperator1[$iz],['blink'])) && ($allNumberTypes1[$iz] == 1)) && $allAmount1[$iz] > 1000 ) {
+                    // return redirect()->back()->with(['type' => 'danger', 'message' => 'Check Above Instructions. Check Robi/Airtel Amount!']);
+                    $amount[] = $allAmount1[$iz];
+
+                    foreach($amount as $val){
+                        $res = $val;
+                        $limit = array();
+                        while($res > 1000){
+                            if(abs($res) > 1000){
+                                $limit[] = 1000;
+                                $res -= 1000;
+                                if(abs($res) > 900){
+                                    $limit[] = 900;
+                                    $res -= 900;
+                                    if(abs($res) > 800){
+                                        $limit[] = 800;
+                                        $res -= 800;
+                                        if(abs($res) > 700){
+                                            $limit[] = 700;
+                                            $res -= 700;
+                                            if(abs($res) > 600){
+                                                $limit[] = 600;
+                                                $res -= 600;
+                                                if(abs($res) > 500){
+                                                    $limit[] = 500;
+                                                    $res -= 500;
+                                                    if(abs($res) > 400){
+                                                        $limit[] = 400;
+                                                        $res -= 400;
+                                                        if(abs($res) > 300){
+                                                            $limit[] = 300;
+                                                            $res -= 300;
+                                                            if(abs($res) > 200){
+                                                                $limit[] = 200;
+                                                                $res -= 200;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }    
+                                }           
+                            }
+                        }
+                        $limit[] = $res;
+                    }
+
+                    // dd(count($limit));
+
+                    foreach($limit as $tk){
+                        if( !PhoneNumber::isValid($allContacts1[$iz]) ) continue;
+                        $allName[$kz] = $allName1[$iz];
+                        $allContacts[$kz] = $allContacts1[$iz];
+                        $allAmount[$kz] = $tk;
+                        $allNumberTypes[$kz] = $allNumberTypes1[$iz];
+                        $allOperator[$kz] = $allOperator1[$iz];
+                        $kz++;
+                    }
+                    
+
+                    // dd($allAmount);
+
+                }else{
+                    if( !PhoneNumber::isValid($allContacts1[$iz]) ) continue;
+                    $allName[$kz] = $allName1[$iz];
+                    $allContacts[$kz] = $allContacts1[$iz];
+                    $allAmount[$kz] = $allAmount1[$iz];
+                    $allNumberTypes[$kz] = $allNumberTypes1[$iz];
+                    $allOperator[$kz] = $allOperator1[$iz];
+                    $kz++;
+                }
+            }
+
+
+
+            $flexiload_total_cost = array_sum($allAmount);
+            $user_balance = BalanceHelper::user_available_balance($user->id);
+            $eligible_amount = $user->flexiload_limit + $flexiload_total_cost;
+
+            if ($eligible_amount >= $user_balance) {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'Insufficient balance !']);
+            }
+            if (BalanceHelper::check_flexiload_parent_available_balance($user->id, $flexiload_total_cost)) {
+                $campaign_id = random_int(10, 90) . time() . random_int(1, 9);
+                try {
+                    DB::beginTransaction();
+
+                    for ($it = 0; $it < count($allAmount); $it++) {
+                        // dd($allContacts);
+                        $load_campaign = new LoadCamPending();
+                        $load_campaign = $this->setUniqueSmsId($load_campaign);
+                        $load_campaign->user_id = $user->id;
+                        if (in_array($allOperator[$it],$validOperator)) {
+                            $load_campaign->operator_id = $allOperator[$it];
+                        }else{
+                            $load_campaign->operator_id = PhoneNumber::getOperatorNameForLoadByNumber($allContacts[$it]);
+                        }
+                        $load_campaign->campaign_id = $campaign_id;
+                        $load_campaign->owner_name = $allName[$it];
+                        $load_campaign->targeted_number = $allContacts[$it];
+                        
+                        $load_campaign->number_type = $allNumberTypes[$it];
+                        $load_campaign->campaign_type = '3'; // Bulk load
+                        $load_campaign->campaign_price = $allAmount[$it];
+
+                        if($load_campaign->operator_id == 'airtel'){
+                            $op_id = 1;
+                        } else if($load_campaign->operator_id == 'blink'){
+                            $op_id = 2;
+                        } else if($load_campaign->operator_id == 'gp'){
+                            $op_id = 3;
+                        } else if($load_campaign->operator_id == 'robi'){
+                            $op_id = 4;
+                        } else{
+                            $op_id = 5;
+                        }
+                
+                        $package = LoadPackage::where('operator_id', $op_id)->where('package_price', $load_campaign->campaign_price)->first();
+                        if(!empty($package)){
+                            $package_id = $package->id;
+                        }else{
+                            $package_id = 0;
+                        }
+
+                        $load_campaign->package_id = $package_id;
+                        $load_campaign->remarks = $remarks;
+
+                        $load_campaign->status = '0';
+
+                        $load_campaign->save();
+                    }
+
+                    // Insert to load campaign ID table
+                    $campaign = new LoadCampaignId();
+                    $campaign->user_id = auth()->id();
+                    $campaign->campaign_id = $campaign_id;
+                    $campaign->campaign_name = $request->campaign_name ?? '';
+                    $campaign->total_number = count($allContacts);
+                    $campaign->total_amount = $flexiload_total_cost;
+
+                    $campaign->save();
+
+                    /*debit user balance*/
+                    $user_position = $user->position;
+                    $user_id = $user->id;
+
+                    $user_det = User::where('id', $user_id)->first();
+                    $current_date = Carbon::now();
+
+                    while ($user_position >= 1 && $user_det) {
+                        /*get total cost against each reseller*/
+                        $price_after_commission = $flexiload_total_cost - (($flexiload_total_cost * $user_det->flexiload_commission) / 100);
+
+                        BalanceHelper::addDebit(
+                            $user_det->create_by,
+                            $user_det->id,
+                            $campaign_id,
+                            $price_after_commission,
+                            5,
+                            1,
+                            2,
+                            $current_date,
+                            0
+                        );
+                        $user_det = User::where('id', $user_det->create_by)->first();
+                        if ($user_det) {
+                            $user_position = $user_det->position;
+                        } else {
+                            break;
+                        }
+                    }
+
+
+                } catch (\Exception $e) {
+                    DB::rollback();
+                    dd($e->getMessage());
+                    return redirect()->back()->with(['type' => 'danger', 'message' => 'Something wrong ' . $e]);
+                }
+                Db::commit();
+            } else {
+                return redirect()->back()->with(['type' => 'danger', 'message' => 'In Sufficient Balance']);
+            }
+
+            return redirect()->back()->with(['type' => 'success', 'message' => 'All requests submitted successfully']);
+
+        } else {
+            $res = new stdClass();
+            $res->error = 'Invalid file...';
+            return redirect()->back()->with(['type' => 'danger', 'message' => 'Invalid File Extention']);
+        }
+    }
+
+    public function packageForm()
+    {
+        $operators = Operator::all();
+        $allPackages = LoadPackage::where('status', 1)->get();
+        $packages = $allPackages->groupBy('operator_id');
+
+        return view('user.flexiload.create', ['operators' => $operators, 'packages' => $packages]);
+    }
+    // =========================================================================
+    //  OFFER CHECK  (talks to the Django backend API at YOUR_SERVER_IP:8080)
+    //  Auth is token-based: POST auth/login/ {email,password} -> {token},
+    //  then send "Authorization: Token <token>" on every call.
+    // =========================================================================
+
+    private $iglBaseUrl = 'http://YOUR_SERVER_IP:8080/api/';
+    private $iglEmail   = 'admin@example.com';
+    private $iglPassword = 'YOUR_PASSWORD';
+    private $iglToken   = null;
+
+    // SIM Profile mapping (auto-populated from API)
+    private $simProfiles = [];
+    private $operatorToSimProfileId = [];
+
+    // Operators shown in the form.
+    private array $operatorChoices = [
+        'grameen'  => 'Grameenphone',
+        'rb'       => 'Robi',
+        'at'       => 'Airtel',
+        'bl'       => 'Banglalink',
+        'teletalk' => 'Teletalk',
+    ];
+
+    // Filter buttons / category keys the offer cards use.
+    private array $categoryLabels = [
+        'all'       => 'All Offers',
+        '30days'    => '30 Days',
+        '7days'     => '7 Days',
+        'data'      => 'Data',
+        'minutes'   => 'Minutes',
+        'combo'     => 'Combo',
+        'social'    => 'Social',
+        'streaming' => 'Streaming',
+        'unlimited' => 'Unlimited',
+    ];
+
+    /** Log in to the backend and cache the token. Returns true on success. */
+    private function authenticateIGL()
+    {
+        try {
+            $client = new Client([
+                'timeout' => 30,
+                'verify'  => false,
+            ]);
+
+            $response = $client->post($this->iglBaseUrl . 'auth/login/', [
+                'json' => [
+                    'email'    => $this->iglEmail,
+                    'password' => $this->iglPassword,
+                ],
+            ]);
+
+            $body = json_decode($response->getBody(), true);
+
+            if (isset($body['token'])) {
+                $this->iglToken = $body['token'];
+                Log::info('IGL Authentication successful');
+
+                // Load SIM profiles after authentication.
+                $this->loadSimProfiles();
+                return true;
+            }
+
+            Log::error('IGL Authentication failed');
+            return false;
+
+        } catch (\Exception $e) {
+            Log::error('IGL Authentication exception: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /** Header array with the auth token. DRF uses the "Token" keyword. */
+    private function iglHeaders()
+    {
+        return [
+            'Authorization' => 'Token ' . $this->iglToken,
+            'Accept'        => 'application/json',
+        ];
+    }
+
+    /** Fetch SIM profiles and build operator -> sim_profile_id map. */
+    private function loadSimProfiles()
+    {
+        try {
+            $client = new Client([
+                'timeout'     => 30,
+                'verify'      => false,
+                'http_errors' => false,
+            ]);
+
+            $response = $client->get($this->iglBaseUrl . 'sim-profiles/', [
+                'headers' => $this->iglHeaders(),
+            ]);
+
+            if ($response->getStatusCode() < 200 || $response->getStatusCode() >= 300) {
+                return;
+            }
+
+            $body = json_decode($response->getBody(), true);
+            // The API may paginate: {results:[...]} or return a plain array.
+            $list = $body['results'] ?? (is_array($body) ? $body : []);
+
+            foreach ($list as $sim) {
+                if (!isset($sim['operator'], $sim['id'])) {
+                    continue;
+                }
+                $this->simProfiles[] = $sim;
+                // Keep the first active SIM per operator.
+                $op = $sim['operator']; // grameenphone / robi / airtel / banglalink
+                if (!isset($this->operatorToSimProfileId[$op]) && ($sim['is_active'] ?? true)) {
+                    $this->operatorToSimProfileId[$op] = $sim['id'];
+                }
+            }
+        } catch (\Exception $e) {
+            Log::error('IGL loadSimProfiles exception: ' . $e->getMessage());
+        }
+    }
+
+    /** Show the empty form. */
+    public function offerForm()
+    {
+        return view('user.flexiload.offer-check', [
+            'operators'  => $this->operatorChoices,
+            'categories' => $this->categoryLabels,
+            'form'       => ['operator' => 'bl', 'number' => '', 'amount' => '10'],
+            'result'     => null,
+            'error'      => null,
+        ]);
+    }
+
+    /** Handle the form submit and fetch offers from the backend. */
+    public function checkOffer(Request $request)
+    {
+        $form = [
+            'operator' => trim((string) $request->input('operator')),
+            'number'   => trim((string) $request->input('number')),
+            'amount'   => trim((string) $request->input('amount', '10')),
+        ];
+
+        $result = null;
+        $error  = null;
+
+        try {
+            $result = $this->fetchOffers($form['operator'], $form['number'], $form['amount']);
+        } catch (\Throwable $e) {
+            $error = $e->getMessage();
+        }
+
+        return view('user.flexiload.offer-check', [
+            'operators'  => $this->operatorChoices,
+            'categories' => $this->categoryLabels,
+            'form'       => $form,
+            'result'     => $result,
+            'error'      => $error,
+        ]);
+    }
+
+    /** JSON endpoint (optional). */
+    public function checkOfferApi(Request $request)
+    {
+        try {
+            $result = $this->fetchOffers(
+                (string) $request->input('operator'),
+                (string) $request->input('number'),
+                $request->input('amount', 10)
+            );
+        } catch (\Throwable $e) {
+            return response()->json(['error' => $e->getMessage()], 400);
+        }
+
+        return response()->json([
+            'operator' => $request->input('operator'),
+            'number'   => $request->input('number'),
+            'amount'   => $request->input('amount'),
+            'count'    => $result['counts']['all'],
+            'offers'   => $result['offers'],
+        ]);
+    }
+
+    /**
+     * Call the backend offer-check endpoint (token auth) and return the offers
+     * plus per-category counts/filters the blade needs. The backend already
+     * returns normalized offers with a 'cat' map, so no normalization here.
+     *
+     * @throws \InvalidArgumentException on bad input
+     * @throws \RuntimeException on API/network problems
+     */
+    private function fetchOffers(string $operator, string $number, $amount): array
+    {
+        $operator = strtolower(trim($operator));
+        $number   = trim($number);
+
+        if (!preg_match('/^(?:\+?88)?01[3-9]\d{8}$/', $number)) {
+            throw new \InvalidArgumentException('Enter a valid Bangladesh mobile number.');
+        }
+        $amount = (int) $amount;
+        if ($amount <= 0) {
+            throw new \InvalidArgumentException('Enter a valid amount.');
+        }
+
+        if (!$this->iglToken && !$this->authenticateIGL()) {
+            throw new \RuntimeException('Could not sign in to the load server. Check the API credentials.');
+        }
+
+        try {
+            $client = new Client([
+                'timeout'     => 30,
+                'verify'      => false,
+                'http_errors' => false,
+            ]);
+
+            $payload = ['operator' => $operator, 'number' => $number, 'amount' => $amount];
+
+            $response = $client->post($this->iglBaseUrl . 'offers/check/', [
+                'headers' => $this->iglHeaders(),
+                'json'    => $payload,
+            ]);
+
+            // Token expired / invalid -> re-authenticate once and retry.
+            if ($response->getStatusCode() === 401) {
+                if ($this->authenticateIGL()) {
+                    $response = $client->post($this->iglBaseUrl . 'offers/check/', [
+                        'headers' => $this->iglHeaders(),
+                        'json'    => $payload,
+                    ]);
+                }
+            }
+        } catch (\Exception $e) {
+            Log::error('Offer check request failed: ' . $e->getMessage());
+            throw new \RuntimeException('Offer API request failed or timed out. Please try again.');
+        }
+
+        $status = $response->getStatusCode();
+        $raw    = (string) $response->getBody();
+
+        if ($status < 200 || $status >= 300) {
+            Log::error("Offer check HTTP {$status}: " . substr($raw, 0, 300));
+            // The API returns {"error":"..."} on 400 (bad number/operator).
+            $decoded = json_decode($raw, true);
+            if (isset($decoded['error'])) {
+                throw new \RuntimeException($decoded['error']);
+            }
+            throw new \RuntimeException("Offer API error ({$status}). Please try again.");
+        }
+
+        $body   = json_decode($raw, true) ?: [];
+        $offers = $body['offers'] ?? [];
+
+        // Per-category counts for the filter buttons.
+        $counts = array_fill_keys(array_keys($this->categoryLabels), 0);
+        $counts['all'] = count($offers);
+        foreach ($offers as $offer) {
+            foreach (($offer['cat'] ?? []) as $key => $isOn) {
+                if ($isOn && isset($counts[$key])) {
+                    $counts[$key]++;
+                }
+            }
+        }
+
+        $filters = [];
+        foreach ($this->categoryLabels as $key => $label) {
+            $filters[] = ['key' => $key, 'label' => $label, 'count' => $counts[$key] ?? 0];
+        }
+
+        return [
+            'offers'     => $offers,
+            'counts'     => $counts,
+            'filters'    => $filters,
+            'message'    => $body['message'] ?? '',
+            'uiOperator' => $operator,
+        ];
+    }
+
+    /**
+     * Buy an offer. This does NOT duplicate any load logic — it reshapes the
+     * offer-check modal fields into the fields your existing single-load method
+     * expects, then hands off to flexiloadFormProcess(). So LoadCamPending
+     * insert, balance debit, etc. all stay in your one existing method.
+     */
+    public function buyOfferProcess(Request $request)
+    {
+        $request->validate([
+            'offer_amount'    => 'required|integer|min:10|max:50000',
+            'number_type'     => 'required',
+            'targeted_number' => 'required',
+            'flexipin'        => 'required',
+            'operator'        => 'required',
+        ]);
+
+        // Map the offer-check operator (grameen/rb/at/bl) to the operator
+        // string your load tables use (gp/robi/airtel/blink).
+        $alias = [
+            'grameen'  => 'gp',     'gp'     => 'gp',
+            'rb'       => 'robi',   'robi'   => 'robi',
+            'at'       => 'airtel', 'airtel' => 'airtel',
+            'bl'       => 'blink',  'blink'  => 'blink',
+            'teletalk' => 'teletalk',
+        ];
+        $operator = $alias[strtolower($request->operator)] ?? $request->operator;
+
+        // Reshape into what flexiloadFormProcess() reads, then delegate to it.
+        $request->merge([
+            'amount'              => (int) $request->offer_amount,
+            'operator'            => $operator,
+            'dynamic_name_column' => $request->owner_name ?? '',
+        ]);
+
+        return $this->flexiloadFormProcess($request);
+    }
+
+
+    public function showPackagesByAjax(Request $request)
+    {
+        try {
+            if (!empty($request->operator) && !empty($request->type)) {
+                $packages = LoadPackage::where('operator_id', $request->operator)
+                    ->where('package_category', $request->type)
+                    ->orderByRaw("CAST(validity as UNSIGNED) ASC")
+                    ->orderBy('package_price', 'ASC')
+                    ->get();
+
+                return view('user.flexiload._ajax_packages_data', ['packages' => $packages]);
+
+            } elseif (!empty($request->operator) && empty($request->type)) {
+                $packages = LoadPackage::where('operator_id', $request->operator)
+                    ->orderByRaw("CAST(validity as UNSIGNED) ASC")
+                    ->orderBy('package_price', 'ASC')
+                    ->get();
+
+                return view('user.flexiload._ajax_packages_data', ['packages' => $packages]);
+
+            } else {
+                return response()->json(['code' => 400]); //error code 1
+            }
+        } catch (\Exception $e) {
+            return response()->json(['code' => 401]); //error code 2
+        }
+    }
+
+
+    // History related methods
+    // History related methods
+    // History related methods
+    public function getCampaignHistoryByAjax(Request $request)
+    {
+        $allData = LoadCampaign30Day::where('campaign_id', $request->campaign_id)->get();
+        return view('user.flexiload.campaignDataByAjax', ['allData' => $allData]);
+    }
+
+    public function downloadFlexiReport(Request $request)
+    {
+        $allData = LoadCampaign30Day::where('campaign_id', $request->campaign_id)
+            ->orderBy('created_at', 'desc')
+            ->get();
+            //dd($allData);
+            //return view('user.flexiload.reportPdf', ['allData' => $allData]);
+        $pdf = PDF::loadView('user.flexiload.reportPdf', ['allData' => $allData]);
+
+        return $pdf->download('flexiload_history.pdf');
+    }
+
+    public function history()
+    {
+        $loads = LoadCampaignId::with('package')->where('user_id', auth()->id())
+            ->where('created_at', '>=', Carbon::now()->startOfMonth())
+            ->orderBy('id', 'desc')
+            ->get();
+
+        return view('user.flexiload.history', ['loads' => $loads]);
+    }
+	public function downloadAllCurrentMonth()
+	{
+	    $allData = LoadCampaign30day::where('user_id', auth()->id())
+		->where('created_at', '>=', \Carbon\Carbon::now()->startOfMonth())
+		->orderBy('created_at', 'desc')
+		->get();
+
+	    $pdf = \PDF::loadView('user.flexiload.currentMonthReportPdf', [
+		'allData' => $allData
+	    ]);
+
+	    return $pdf->download('all_flexiload_current_month.pdf');
+	}
+    public function history_archieve(Request $request)
+    {
+        if (!isset($request->year) && !isset($request->month)) {
+            $loads = LoadCampaignId::with('package')->where('user_id', auth()->id())->where('created_at', '<', Carbon::now()->startOfMonth())->orderBy('id', 'desc')->get();
+            // dd($loads);
+        } else {
+            $year = $request->year;
+            $month = $request->month;
+            
+            $loads = LoadCampaignId::with('package')->where('user_id', auth()->id())
+                ->whereYear('created_at', '=', $year)
+                ->whereMonth('created_at', '=', $month)
+                ->orderBy('id', 'desc')
+                ->get();
+            // dd($loads);
+        }
+
+        return view('user.flexiload.history_archieved', ['loads' => $loads]);
+    }
+
+    public function getCurrentMonthyCampaignHistoryByAjax(Request $request)
+    {
+        $all = LoadCamPending::where('campaign_id',$request->campaign_id)->get();
+        
+        $allData = LoadCampaign30day::where('campaign_id', $request->campaign_id)->get();
+        return view('user.flexiload.currentMonthCampaignDataByAjax', ['allData' => $allData, 'all' => $all]);
+    }
+
+    public function downloadCurrentMonthFlexiReport(Request $request)
+    {
+        $allData = LoadCampaign30day::where('campaign_id', $request->campaign_id)
+            
+            ->orderBy('created_at', 'desc')
+            ->get();
+        //return view('user.flexiload.currentMonthReportPdf', ['allData' => $allData]);
+        $pdf = PDF::loadView('user.flexiload.currentMonthReportPdf', ['allData' => $allData]);
+
+        return $pdf->download('flexiload_history.pdf');
+    }
+
+    public function package_history(Request $request)
+    {
+        $packages = LoadCampaign30day::select(DB::raw("SUM(campaign_price) as total_price"), DB::raw("count(*) as total_package"), 'operator_id')
+        ->where('user_id', auth()->id())
+        ->where('package_id', '!=', '0')
+        ->groupBy('operator_id')
+        ->get();
+
+        return view('user.flexiload.package_history', ['packages' => $packages]);
+    }
+
+}
+
+full controller and blade are 
+@extends('user.master')
+
+@section('load_menu_class','open')
+@section('submenu_load','open')
+@section('load_make_check_class','active')
+
+@section('page_location')
+<ul class="breadcrumb">
+    <li>
+        <i class="ace-icon fa fa-home home-icon"></i>
+        <a href="{{ route('user.index') }}">Dashboard</a>
+    </li>
+    <li class="active">Flexiload Offer Check</li>
+</ul>
+@endsection
+
+@section('page_header')
+<h1>
+    Flexiload
+    <small>
+        <i class="ace-icon fa fa-angle-double-right"></i>
+        Offer Check
+    </small>
+</h1>
+@endsection
+
+@section('main_content')
+
+<div class="row">
+    @include('user.partials.session_messages')
+
+    <div class="col-xs-12">
+        <div class="widget-box widget-color-blue">
+            <div class="widget-header">
+                <h4 class="widget-title lighter">
+                    <i class="ace-icon fa fa-search"></i>
+                    Check Flexiload Offer
+                </h4>
+            </div>
+
+            <div class="widget-body">
+                <div class="widget-main">
+                    {{-- POST to offer-check. The named route 'user.offer.check' actually
+                         resolves to this POST route, so use url() to be safe. --}}
+                    <form action="{{ url('offer-check') }}" method="POST" class="form-horizontal">
+                        @csrf
+
+                        <div class="form-group">
+                            <label class="col-sm-3 control-label no-padding-right" for="operator">Operator</label>
+                            <div class="col-sm-6">
+                                <select name="operator" id="operator" class="form-control" required>
+                                    <option value="">-- Select Operator --</option>
+                                    @foreach ($operators as $value => $label)
+                                        <option value="{{ $value }}"
+                                            {{ (($form['operator'] ?? old('operator')) == $value) ? 'selected' : '' }}>
+                                            {{ $label }}
+                                        </option>
+                                    @endforeach
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="col-sm-3 control-label no-padding-right" for="number">Phone Number</label>
+                            <div class="col-sm-6">
+                                <input type="text" id="number" name="number"
+                                       value="{{ $form['number'] ?? old('number') }}"
+                                       class="form-control phone-input-large"
+                                       placeholder="e.g. 017xxxxxxxx" required>
+                            </div>
+                        </div>
+
+                        <input type="hidden" id="amount" name="amount"
+                               value="{{ $form['amount'] ?? old('amount', '10') }}">
+
+                        <div class="form-group">
+                            <div class="col-sm-offset-3 col-sm-6">
+                                <button type="submit" class="btn btn-primary btn-lg">
+                                    <i class="fa fa-search"></i> Check Offer
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+
+                    @if (!empty($error))
+                        <div class="alert alert-danger mt-3">
+                            <i class="fa fa-exclamation-triangle"></i> {{ $error }}
+                        </div>
+                    @endif
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{{-- Offer Result Section --}}
+@if (!empty($result) && !empty($result['offers']))
+    @php
+        $offers    = $result['offers'];
+        $counts    = $result['counts'];
+        $filters   = $result['filters'];
+        $message   = $result['message'] ?? '';
+
+        // Split for the individual filter buttons
+        $thirtyDaysOffers = $sevenDaysOffers = $dataPackages = $minutePackages = [];
+        $comboPackages = $socialPackages = $streamingPackages = $unlimitedPackages = [];
+
+        foreach ($offers as $o) {
+            if (!empty($o['cat']['30days']))    $thirtyDaysOffers[]  = $o;
+            if (!empty($o['cat']['7days']))     $sevenDaysOffers[]   = $o;
+            if (!empty($o['cat']['data']))      $dataPackages[]      = $o;
+            if (!empty($o['cat']['minutes']))   $minutePackages[]    = $o;
+            if (!empty($o['cat']['combo']))     $comboPackages[]     = $o;
+            if (!empty($o['cat']['social']))    $socialPackages[]    = $o;
+            if (!empty($o['cat']['streaming'])) $streamingPackages[] = $o;
+            if (!empty($o['cat']['unlimited'])) $unlimitedPackages[] = $o;
+        }
+
+        $offersCount = count($offers);
+    @endphp
+
+    <div class="row mt-4">
+        <div class="col-xs-12">
+            <div class="widget-box widget-color-green2">
+                <div class="widget-header">
+                    <h4 class="widget-title lighter">
+                        <i class="ace-icon fa fa-gift"></i>
+                        Available Offers
+                    </h4>
+                </div>
+                <div class="widget-body">
+                    <div class="widget-main">
+
+                        <div class="search-info mb-4 p-4 bg-light rounded">
+                            <div class="row text-center">
+                                <div class="col-md-4 col-sm-4 col-xs-4">
+                                    <small><strong>Operator:</strong></small><br>
+                                    <span class="badge operator-badge-lg" id="operator-badge">
+                                        {{ strtoupper($form['operator']) }}
+                                    </span>
+                                </div>
+                                <div class="col-md-4 col-sm-4 col-xs-4">
+                                    <small><strong>Phone Number:</strong></small><br>
+                                    <span class="phone-number-large">{{ $form['number'] }}</span>
+                                </div>
+                                <div class="col-md-4 col-sm-4 col-xs-4">
+                                    <small><strong>Total Offers:</strong></small><br>
+                                    <span class="badge badge-info">{{ $offersCount }}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        @if ($offersCount > 0)
+                            {{-- Filter buttons --}}
+                            <div class="filter-buttons mb-4">
+                                <div class="row mb-3">
+                                    <div class="col-md-12">
+                                        <div class="d-flex flex-wrap justify-content-center gap-2 mb-3">
+                                            <button type="button" class="btn btn-primary btn-filter-multi active" data-filter="all">
+                                                <i class="fa fa-list"></i> All Offers ({{ $offersCount }})
+                                            </button>
+                                            <button type="button" class="btn btn-success btn-filter-multi" data-filter="30days">
+                                                <i class="fa fa-calendar"></i> 30 Days ({{ count($thirtyDaysOffers) }})
+                                            </button>
+                                            <button type="button" class="btn btn-warning btn-filter-multi" data-filter="7days">
+                                                <i class="fa fa-calendar"></i> 7 Days ({{ count($sevenDaysOffers) }})
+                                            </button>
+                                            <button type="button" class="btn btn-info btn-filter-multi" data-filter="data">
+                                                <i class="fa fa-database"></i> Data ({{ count($dataPackages) }})
+                                            </button>
+                                            <button type="button" class="btn btn-secondary btn-filter-multi" data-filter="minutes">
+                                                <i class="fa fa-phone"></i> Minutes ({{ count($minutePackages) }})
+                                            </button>
+                                            <button type="button" class="btn btn-purple btn-filter-multi" data-filter="combo">
+                                                <i class="fa fa-layer-group"></i> Combo ({{ count($comboPackages) }})
+                                            </button>
+                                            <button type="button" class="btn btn-pink btn-filter-multi" data-filter="social">
+                                                <i class="fa fa-share-alt"></i> Social ({{ count($socialPackages) }})
+                                            </button>
+                                            <button type="button" class="btn btn-orange btn-filter-multi" data-filter="streaming">
+                                                <i class="fa fa-video"></i> Streaming ({{ count($streamingPackages) }})
+                                            </button>
+                                            <button type="button" class="btn btn-dark btn-filter-multi" data-filter="unlimited">
+                                                <i class="fa fa-infinity"></i> Unlimited ({{ count($unlimitedPackages) }})
+                                            </button>
+                                        </div>
+
+                                        <div class="selected-filters-container mb-3 text-center" style="display: none;">
+                                            <div class="d-inline-block">
+                                                <span class="badge bg-light text-dark me-2">
+                                                    Active Filters (AND Logic):
+                                                    <span id="selected-filters-list"></span>
+                                                </span>
+                                                <button type="button" class="btn btn-sm btn-outline-danger" id="clear-filters">
+                                                    <i class="fa fa-times"></i> Clear All
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div class="alert alert-info text-center py-2 mb-3" id="filter-status">
+                                            <i class="fa fa-filter"></i> Showing all {{ $offersCount }} offers
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {{-- Offer cards --}}
+                            <div class="offers-grid-8-col">
+                                <div class="offers-container-8" id="offers-container">
+                                    @foreach ($offers as $offer)
+                                        @php
+                                            $offerId       = $offer['id'] ?? '';
+                                            $offerAmount   = is_numeric($offer['amount'] ?? 0) ? $offer['amount'] : 0;
+                                            $offerSummary  = $offer['summary'] ?? 'Special Offer';
+                                            $offerValidity = $offer['validity'] ?? 'N/A';
+                                            $offerUssd     = $offer['ussd'] ?? '';
+                                            $offerType     = $offer['type'] ?? 'Offer';
+
+                                            $cat         = $offer['cat'] ?? [];
+                                            $is30Days    = !empty($cat['30days']);
+                                            $is7Days     = !empty($cat['7days']);
+                                            $hasData     = !empty($cat['data']);
+                                            $hasMinutes  = !empty($cat['minutes']);
+                                            $hasCombo    = !empty($cat['combo']);
+                                            $hasSocial   = !empty($cat['social']);
+                                            $hasStreaming= !empty($cat['streaming']);
+                                            $hasUnlimited= !empty($cat['unlimited']);
+
+                                            $packageTypes = [];
+                                            if ($is30Days)     $packageTypes[] = 'filter-30days';
+                                            if ($is7Days)      $packageTypes[] = 'filter-7days';
+                                            if ($hasData)      $packageTypes[] = 'filter-data';
+                                            if ($hasMinutes)   $packageTypes[] = 'filter-minutes';
+                                            if ($hasCombo)     $packageTypes[] = 'filter-combo';
+                                            if ($hasSocial)    $packageTypes[] = 'filter-social';
+                                            if ($hasStreaming) $packageTypes[] = 'filter-streaming';
+                                            if ($hasUnlimited) $packageTypes[] = 'filter-unlimited';
+                                            $packageTypesString = implode(' ', array_unique($packageTypes));
+
+                                            // Nice validity display
+                                            $displayValidity = $offerValidity;
+                                            if (preg_match('/\d+/', $offerValidity, $m)) {
+                                                $hours = (int) $m[0];
+                                                if (stripos($offerValidity, 'hour') !== false || stripos($offerValidity, 'hr') !== false || preg_match('/\d+\s*h$/i', $offerValidity)) {
+                                                    $days = intdiv($hours, 24);
+                                                    $rem  = $hours % 24;
+                                                    if ($days > 0 && $rem > 0) {
+                                                        $displayValidity = "{$days} Day" . ($days > 1 ? 's' : '') . " {$rem} Hour" . ($rem > 1 ? 's' : '');
+                                                    } elseif ($days > 0) {
+                                                        $displayValidity = "{$days} Day" . ($days > 1 ? 's' : '');
+                                                    } else {
+                                                        $displayValidity = "{$rem} Hour" . ($rem > 1 ? 's' : '');
+                                                    }
+                                                }
+                                            }
+                                        @endphp
+
+                                        <div class="offer-card-8-col offer-item {{ $packageTypesString }}"
+                                             data-30days="{{ $is30Days ? 'yes' : 'no' }}"
+                                             data-7days="{{ $is7Days ? 'yes' : 'no' }}"
+                                             data-data="{{ $hasData ? 'yes' : 'no' }}"
+                                             data-minutes="{{ $hasMinutes ? 'yes' : 'no' }}"
+                                             data-combo="{{ $hasCombo ? 'yes' : 'no' }}"
+                                             data-social="{{ $hasSocial ? 'yes' : 'no' }}"
+                                             data-streaming="{{ $hasStreaming ? 'yes' : 'no' }}"
+                                             data-unlimited="{{ $hasUnlimited ? 'yes' : 'no' }}">
+
+                                            <div class="offer-header-8-col">
+                                                <div class="operator-logo-8-col">
+                                                    @switch($form['operator'])
+                                                        @case('grameen')
+                                                            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/98/Grameenphone_Logo_GP_Logo.svg/180px-Grameenphone_Logo_GP_Logo.svg.png" alt="GP" class="operator-logo-img">
+                                                            @break
+                                                        @case('rb')
+                                                            <img src="https://upload.wikimedia.org/wikipedia/en/thumb/7/7b/Logo_of_Robi_Axiata.svg/225px-Logo_of_Robi_Axiata.svg.png" alt="Robi" class="operator-logo-img">
+                                                            @break
+                                                        @case('at')
+                                                            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/f/fb/Bharti_Airtel_Logo.svg/330px-Bharti_Airtel_Logo.svg.png" alt="Airtel" class="operator-logo-img">
+                                                            @break
+                                                        @case('bl')
+                                                            <img src="https://banglalink.net/logo.svg" alt="Banglalink" class="operator-logo-img" style="width:80px;height:40px;">
+                                                            @break
+                                                        @case('teletalk')
+                                                            <div class="operator-logo-placeholder-8 teletalk-logo-8"><i class="fas fa-satellite"></i></div>
+                                                            @break
+                                                        @default
+                                                            <div class="operator-logo-placeholder-8"><i class="fas fa-sim-card"></i></div>
+                                                    @endswitch
+                                                </div>
+                                            </div>
+
+                                            <div class="offer-content-8-col">
+                                                <h6 class="offer-summary-8-col" title="{{ $offerSummary }}">
+                                                    {{ $offerSummary }}
+                                                </h6>
+                                            </div>
+
+                                            <div class="offer-price-8-col">
+                                                <div class="price-display-8-col">
+                                                    <span class="price-amount-8-col">{{ $offerAmount }}</span>
+                                                    <span class="price-currency-8-col">Tk</span>
+                                                </div>
+                                            </div>
+
+                                            <div class="offer-details-8-col">
+                                                <div class="detail-item-8-col">
+                                                    <i class="fas fa-clock"></i>
+                                                    <span class="validity-8-col">{{ $displayValidity }}</span>
+                                                </div>
+                                            </div>
+
+                                            <div class="offer-footer-8-col">
+                                                <button type="button"
+                                                        class="btn-buy-now-8-col"
+                                                        data-offer-id="{{ $offerId }}"
+                                                        data-amount="{{ $offerAmount }}"
+                                                        data-ussd="{{ $offerUssd }}"
+                                                        data-summary="{{ $offerSummary }}"
+                                                        data-validity="{{ $offerValidity }}"
+                                                        data-offer-type="{{ $offerType }}"
+                                                        data-number="{{ $form['number'] }}"
+                                                        data-operator="{{ $form['operator'] }}">
+                                                    <i class="fas fa-shopping-cart"></i> Buy Now
+                                                </button>
+                                            </div>
+                                        </div>
+                                    @endforeach
+                                </div>
+                            </div>
+                        @else
+                            <div class="alert alert-info text-center py-3">
+                                <i class="fa fa-info-circle"></i>
+                                {{ $message ?: 'No offers found for the specified criteria.' }}
+                            </div>
+                        @endif
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {{-- Buy Offer Modal --}}
+    <div class="modal fade" id="buyOfferModal" tabindex="-1" role="dialog" aria-labelledby="offerModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h4 class="modal-title" id="offerModalLabel">Purchase Offer</h4>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                </div>
+                <form action="{{ url('offer-buy') }}" method="post" id="offerPurchaseForm">
+                    @csrf
+                    <div class="modal-body">
+                        <div class="alert alert-info mb-4">
+                            <h5 class="alert-heading mb-3" id="modal_offer_summary"></h5>
+                            <div class="row text-center">
+                                <div class="col-md-3 col-6 mb-3">
+                                    <div class="modal-info-item">
+                                        <div class="modal-info-label">Price</div>
+                                        <div class="modal-info-value price-highlight-lg" id="modal_offer_amount"></div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 col-6 mb-3">
+                                    <div class="modal-info-item">
+                                        <div class="modal-info-label">Validity</div>
+                                        <div class="modal-info-value" id="modal_offer_validity"></div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 col-6 mb-3">
+                                    <div class="modal-info-item">
+                                        <div class="modal-info-label">Type</div>
+                                        <div class="modal-info-value" id="modal_offer_type"></div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 col-6 mb-3">
+                                    <div class="modal-info-item">
+                                        <div class="modal-info-label">USSD Code</div>
+                                        <div class="modal-info-value ussd-code-lg" id="modal_offer_ussd"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <input type="hidden" name="offer_id" id="modal_offer_id">
+                        <input type="hidden" name="offer_amount" id="modal_hidden_amount">
+                        <input type="hidden" name="offer_summary" id="modal_hidden_summary">
+                        <input type="hidden" name="operator" id="modal_operator">
+
+                        <div class="form-group">
+                            <label for="modal_targeted_number" class="form-label-lg">Mobile Number</label>
+                            <input type="text" class="form-control form-control-xl phone-input-xl"
+                                   id="modal_targeted_number" name="targeted_number"
+                                   placeholder="Enter 11-digit phone number" required readonly>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label-lg">Number Type</label>
+                            <div class="number-type-options-lg">
+                                <label class="radio-option-lg">
+                                    <input type="radio" name="number_type" value="1" checked required>
+                                    <span class="radio-label-lg">Prepaid</span>
+                                </label>
+                                <label class="radio-option-lg">
+                                    <input type="radio" name="number_type" value="2" required>
+                                    <span class="radio-label-lg">Postpaid</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="modal_campaign_name" class="form-label-lg">Campaign Name (Optional)</label>
+                            <input type="text" class="form-control" id="modal_campaign_name" name="campaign_name" placeholder="Enter campaign name">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="modal_owner_name" class="form-label-lg">Number Owner Name (Optional)</label>
+                            <input type="text" class="form-control" id="modal_owner_name" name="owner_name" placeholder="Enter owner name">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="modal_remarks" class="form-label-lg">Remarks (Optional)</label>
+                            <input type="text" class="form-control" id="modal_remarks" name="remarks" placeholder="Enter remarks">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="modal_flexipin" class="form-label-lg">Flexipin</label>
+                            <input type="password" class="form-control form-control-lg" id="modal_flexipin" name="flexipin" placeholder="Enter your flexipin" required>
+                        </div>
+                    </div>
+
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary btn-lg" data-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-success btn-lg">
+                            <i class="fa fa-shopping-cart"></i> Confirm Purchase
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+@endif
+
+<style>
+.btn-purple { background-color: #6f42c1; color: white; border-color: #6f42c1; }
+.btn-pink { background-color: #e83e8c; color: white; border-color: #e83e8c; }
+.btn-orange { background-color: #fd7e14; color: white; border-color: #fd7e14; }
+.btn-group .btn { margin: 2px; }
+.badge-highlight { color: #ff6b00; font-size: 12px; }
+.commission-badge { background: #28a745; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; margin-top: 5px; display: inline-block; }
+
+.btn-filter-multi {
+    border-radius: 20px;
+    padding: 8px 16px;
+    margin: 2px;
+    transition: all 0.3s ease;
+    border-width: 2px;
+    font-weight: 600;
+    font-size: 14px;
+    min-width: 90px;
+    text-align: center;
+}
+.btn-filter-multi.active {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    font-weight: 700;
+}
+.btn-filter-multi:hover:not(.active) {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+.selected-filters-container {
+    background: #f8f9fa;
+    border-radius: 10px;
+    padding: 10px 15px;
+    border: 1px solid #e9ecef;
+}
+#selected-filters-list .badge { font-size: 12px; padding: 5px 8px; margin: 2px; }
+#filter-status {
+    font-size: 14px;
+    padding: 8px 15px;
+    border-radius: 8px;
+    background: #e7f3ff;
+    border-left: 4px solid #0069d9;
+}
+
+.offers-grid-8-col {
+    max-height: 700px;
+    overflow-y: auto;
+    padding-right: 15px;
+    margin: 0 -5px;
+}
+.offers-container-8 {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 12px;
+    padding: 10px 5px;
+}
+.offer-card-8-col {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    border: 1px solid #e8e8e8;
+    transition: all 0.3s ease;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 240px;
+    min-width: 0;
+    position: relative;
+}
+.offer-card-8-col:hover { transform: translateY(-5px); box-shadow: 0 8px 25px rgba(0,0,0,0.15); }
+.offer-header-8-col {
+    padding: 8px;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-bottom: 1px solid #e8e8e8;
+    text-align: center;
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.operator-logo-8-col { display: flex; align-items: center; justify-content: center; }
+.operator-logo-img { width: 28px; height: 28px; object-fit: contain; border-radius: 6px; }
+.operator-logo-placeholder-8 {
+    width: 28px; height: 28px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-size: 12px;
+}
+.operator-logo-placeholder-8.teletalk-logo-8 { background: #0066b3; }
+.offer-content-8-col {
+    padding: 8px; flex: 1;
+    display: flex; align-items: center;
+    min-height: 45px; max-height: 50px; overflow: hidden;
+}
+.offer-summary-8-col {
+    font-size: 13px; font-weight: 700; color: #2c3e50;
+    margin: 0; line-height: 1.3; text-align: center; width: 100%;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.offer-price-8-col {
+    padding: 5px 8px; text-align: center; min-height: 40px;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.price-display-8-col {
+    background: linear-gradient(135deg, #27ae60, #2ecc71);
+    color: white; padding: 5px 8px; border-radius: 8px;
+    display: inline-flex; align-items: baseline; gap: 4px;
+    box-shadow: 0 2px 8px rgba(39, 174, 96, 0.3);
+}
+.price-amount-8-col { font-size: 14px; font-weight: 800; }
+.price-currency-8-col { font-size: 10px; font-weight: 700; }
+.offer-details-8-col {
+    padding: 5px 8px; border-top: 1px dashed #e8e8e8;
+    min-height: 25px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.detail-item-8-col { display: flex; align-items: center; justify-content: center; gap: 4px; font-size: 9px; color: #6c757d; }
+.validity-8-col { font-size: 18px; font-weight: 700; color: #e67e22; }
+.offer-footer-8-col {
+    padding: 6px 8px; background: #f8f9fa;
+    border-top: 1px solid #e8e8e8; min-height: 40px;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    margin-top: auto;
+}
+.btn-buy-now-8-col {
+    width: 100%;
+    background: linear-gradient(135deg, #28a745, #20c997);
+    color: white; border: none; padding: 6px 8px; border-radius: 6px;
+    font-size: 11px; font-weight: 700; cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex; align-items: center; justify-content: center; gap: 4px;
+    box-shadow: 0 2px 6px rgba(40, 167, 69, 0.3);
+    min-height: 30px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.btn-buy-now-8-col:hover {
+    background: linear-gradient(135deg, #218838, #1ea085);
+    transform: translateY(-1px);
+    box-shadow: 0 3px 8px rgba(40, 167, 69, 0.4);
+}
+.phone-input-large { font-size: 16px; font-weight: 600; padding: 10px 12px; height: 46px; }
+.phone-input-xl { font-size: 18px; font-weight: 700; padding: 12px 15px; height: 52px; letter-spacing: 1px; }
+.phone-number-large { font-size: 18px; font-weight: 700; color: #2c3e50; }
+.operator-badge-lg { font-size: 14px; padding: 8px 16px; }
+.form-label-lg { font-size: 16px; font-weight: 600; color: #2c3e50; margin-bottom: 10px; }
+.price-highlight-lg { color: #28a745; font-size: 18px; font-weight: 800; }
+.ussd-code-lg {
+    font-family: 'Courier New', monospace; background: #f8f9fa;
+    padding: 6px 10px; border-radius: 6px; border: 1px solid #e9ecef;
+    font-size: 14px; font-weight: 600;
+}
+.number-type-options-lg { display: flex; gap: 25px; }
+.radio-option-lg { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 15px; }
+.radio-label-lg { font-weight: 600; color: #495057; font-size: 15px; }
+
+.offers-grid-8-col::-webkit-scrollbar { width: 8px; }
+.offers-grid-8-col::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 6px; }
+.offers-grid-8-col::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 6px; }
+.offers-grid-8-col::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
+
+@media (max-width: 1600px) { .offers-container-8 { grid-template-columns: repeat(6, 1fr); } }
+@media (max-width: 1200px) { .offers-container-8 { grid-template-columns: repeat(5, 1fr); } }
+@media (max-width: 992px) {
+    .offers-container-8 { grid-template-columns: repeat(4, 1fr); }
+    .btn-filter-multi { padding: 6px 12px; font-size: 12px; min-width: 80px; }
+    #filter-status { font-size: 13px; padding: 6px 10px; }
+}
+@media (max-width: 768px) {
+    .offers-container-8 { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .offer-card-8-col { min-height: 220px; }
+    .offer-summary-8-col { font-size: 12px; }
+    .validity-8-col { font-size: 16px; }
+    .btn-buy-now-8-col { padding: 5px 6px; font-size: 10px; min-height: 28px; }
+}
+@media (max-width: 576px) {
+    .offers-container-8 { grid-template-columns: repeat(2, 1fr); gap: 6px; }
+    .offer-card-8-col { min-height: 200px; }
+    .btn-filter-multi { padding: 5px 10px; font-size: 11px; min-width: 70px; }
+    .offer-summary-8-col { font-size: 11px; }
+    .validity-8-col { font-size: 14px; }
+    .btn-buy-now-8-col { font-size: 9px; min-height: 26px; }
+}
+@media (max-width: 400px) {
+    .offers-container-8 { grid-template-columns: 1fr; }
+    .offer-card-8-col { max-width: 250px; margin: 0 auto; }
+}
+
+@keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.offer-card-8-col { animation: fadeInUp 0.5s ease forwards; }
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    let activeFilters = new Set(['all']);
+    const allOfferCards = document.querySelectorAll('.offer-item');
+    const filterButtons = document.querySelectorAll('.btn-filter-multi');
+    const clearFiltersBtn = document.getElementById('clear-filters');
+    const selectedFiltersContainer = document.querySelector('.selected-filters-container');
+    const selectedFiltersList = document.getElementById('selected-filters-list');
+    const filterStatus = document.getElementById('filter-status');
+
+    const filterNames = {
+        'all': 'All', '30days': '30 Days', '7days': '7 Days',
+        'data': 'Data', 'minutes': 'Minutes', 'combo': 'Combo',
+        'social': 'Social', 'streaming': 'Streaming', 'unlimited': 'Unlimited'
+    };
+
+    function updateSelectedFiltersDisplay() {
+        const selected = Array.from(activeFilters).filter(f => f !== 'all');
+        if (selected.length > 0) {
+            selectedFiltersList.innerHTML = selected.map(f =>
+                `<span class="badge bg-primary me-1">${filterNames[f]}</span>`
+            ).join('');
+            selectedFiltersContainer.style.display = 'block';
+        } else {
+            selectedFiltersContainer.style.display = 'none';
+        }
+    }
+
+    function updateFilterStatus(visibleCount) {
+        const selected = Array.from(activeFilters).filter(f => f !== 'all');
+        if (selected.length === 0) {
+            filterStatus.innerHTML = `<i class="fa fa-filter"></i> Showing all ${allOfferCards.length} offers`;
+        } else {
+            filterStatus.innerHTML = `<i class="fa fa-filter"></i> Showing ${visibleCount} offers matching ALL: ${selected.map(f => filterNames[f]).join(' + ')}`;
+        }
+    }
+
+    function updateFilterButtons() {
+        filterButtons.forEach(button => {
+            const filter = button.getAttribute('data-filter');
+            button.classList.toggle('active', activeFilters.has(filter));
+        });
+    }
+
+    function applyFilters() {
+        let visibleCount = 0;
+        const selectedFilters = Array.from(activeFilters).filter(f => f !== 'all');
+
+        allOfferCards.forEach(card => {
+            let shouldShow = false;
+
+            if (activeFilters.has('all') || selectedFilters.length === 0) {
+                shouldShow = true;
+            } else {
+                shouldShow = true;
+                for (let filter of selectedFilters) {
+                    if (card.getAttribute(`data-${filter}`) !== 'yes') {
+                        shouldShow = false;
+                        break;
+                    }
+                }
+
+                if (selectedFilters.includes('data') && selectedFilters.includes('minutes')) {
+                    if (card.getAttribute('data-combo') !== 'yes') shouldShow = false;
+                } else if (selectedFilters.includes('data') && !selectedFilters.includes('minutes')) {
+                    if (card.getAttribute('data-combo') === 'yes') shouldShow = false;
+                } else if (selectedFilters.includes('minutes') && !selectedFilters.includes('data')) {
+                    if (card.getAttribute('data-combo') === 'yes') shouldShow = false;
+                }
+            }
+
+            if (shouldShow) {
+                card.style.display = 'block';
+                visibleCount++;
+                card.style.animation = 'fadeInUp 0.3s ease forwards';
+            } else {
+                card.style.display = 'none';
+            }
+        });
+
+        updateFilterStatus(visibleCount);
+        updateSelectedFiltersDisplay();
+        updateFilterButtons();
+    }
+
+    filterButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const filter = this.getAttribute('data-filter');
+            if (filter === 'all') {
+                activeFilters.clear();
+                activeFilters.add('all');
+            } else {
+                activeFilters.delete('all');
+                if (activeFilters.has(filter)) {
+                    activeFilters.delete(filter);
+                    if (activeFilters.size === 0) activeFilters.add('all');
+                } else {
+                    activeFilters.add(filter);
+                }
+            }
+            applyFilters();
+        });
+    });
+
+    if (clearFiltersBtn) {
+        clearFiltersBtn.addEventListener('click', function() {
+            activeFilters.clear();
+            activeFilters.add('all');
+            applyFilters();
+        });
+    }
+
+    applyFilters();
+
+    // Buy Now handler
+    document.querySelectorAll('.btn-buy-now-8-col').forEach(button => {
+        button.addEventListener('click', function() {
+            const offerId   = this.getAttribute('data-offer-id');
+            const amount    = this.getAttribute('data-amount');
+            const ussd      = this.getAttribute('data-ussd');
+            const summary   = this.getAttribute('data-summary');
+            const validity  = this.getAttribute('data-validity');
+            const offerType = this.getAttribute('data-offer-type');
+            const number    = this.getAttribute('data-number');
+            const operator  = this.getAttribute('data-operator');
+
+            document.getElementById('modal_offer_summary').textContent = summary;
+            document.getElementById('modal_offer_amount').textContent = amount + ' Tk';
+            document.getElementById('modal_offer_validity').textContent = validity;
+            document.getElementById('modal_offer_type').textContent = offerType;
+            document.getElementById('modal_offer_ussd').textContent = ussd ? '*' + ussd + '#' : 'N/A';
+
+            document.getElementById('modal_offer_id').value = offerId;
+            document.getElementById('modal_hidden_amount').value = amount;
+            document.getElementById('modal_hidden_summary').value = summary;
+            document.getElementById('modal_operator').value = operator;
+
+            document.getElementById('modal_targeted_number').value = number;
+            document.getElementById('offerModalLabel').textContent = 'Purchase Offer';
+
+            $('#buyOfferModal').modal('show');
+        });
+    });
+
+    // Phone input sanitization
+    document.querySelectorAll('.phone-input-large, .phone-input-xl').forEach(input => {
+        input.addEventListener('input', function(e) {
+            let value = e.target.value.replace(/\D/g, '');
+            let maxLength = value.startsWith('88') ? 13 : 11;
+            if (value.length > maxLength) value = value.slice(0, maxLength);
+            e.target.value = value;
+        });
+    });
+
+    // Operator badge color
+    const operatorBadge = document.getElementById('operator-badge');
+    if (operatorBadge) {
+        const op = operatorBadge.textContent.trim().toUpperCase();
+        operatorBadge.classList.remove('badge-primary','badge-success','badge-danger','badge-warning','badge-info','badge-secondary');
+        switch (op) {
+            case 'GRAMEEEN':
+            case 'GP':       operatorBadge.classList.add('badge-primary'); break;
+            case 'RB':
+            case 'ROBI':     operatorBadge.classList.add('badge-success'); break;
+            case 'AT':
+            case 'AIRTEL':   operatorBadge.classList.add('badge-danger'); break;
+            case 'BL':       operatorBadge.classList.add('badge-warning'); break;
+            case 'TELETALK': operatorBadge.classList.add('badge-info'); break;
+            default:         operatorBadge.classList.add('badge-secondary');
+        }
+    }
+});
+</script>
+@endsection 
+
+
+and env i add  
+
+
+OFFER_API_BASE_URL=http://YOUR_SERVER_IP:8080
+OFFER_API_USER_ID=YOUR_USER_ID
+OFFER_API_PASSWORD=YOUR_PASSWORD
+OFFER_API_REFER_ID=YOUR_REFER_ID
+OFFER_API_TIMEOUT=30 
+
+and service  
+'offer_api' => [
+    'base_url'  => env('OFFER_API_BASE_URL', 'http://YOUR_SERVER_IP:8080'),
+    'user_id'   => env('OFFER_API_USER_ID', 'YOUR_USER_ID'),
+    'password'  => env('OFFER_API_PASSWORD', 'YOUR_PASSWORD'),
+    'refer_id'  => env('OFFER_API_REFER_ID', 'YOUR_REFER_ID'),
+    'timeout'   => (int) env('OFFER_API_TIMEOUT', 30),
+],

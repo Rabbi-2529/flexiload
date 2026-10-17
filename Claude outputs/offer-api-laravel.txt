@@ -1,0 +1,455 @@
+===============================================================================
+ OFFER CHECK (AGGREGATOR API) FOR LARAVEL  —  DROP-IN, NOTHING ELSE CHANGED
+===============================================================================
+
+This uses the external offer API (YOUR_SERVER_IP) in your Laravel panel.
+You do NOT edit any of your existing code. You only:
+
+  1. Add ONE new file:  app/Http/Controllers/User/Flexiload/OfferController.php
+  2. Add 3 routes (below).
+  3. Add the .env keys + the config/services.php block (below).
+  4. Keep your existing offer-check blade (it already posts to offer-check / offer-buy).
+
+"Buy" does NOT duplicate your load logic — it reshapes the request and calls your
+existing LoadController@flexiloadFormProcess. So your single-load flow stays the
+one source of truth.
+
+NOTE ON THE ERROR YOU SAW: the API base URL below defaults to :8080. Your old
+Laravel used :9090. If "Check Offer" returns an API error, change only
+OFFER_API_BASE_URL in .env to http://YOUR_SERVER_IP:9090 (no code change) and test
+with the curl at the very bottom of this file.
+
+
+===============================================================================
+ 1) NEW FILE:  app/Http/Controllers/User/Flexiload/OfferController.php
+===============================================================================
+
+<?php
+
+namespace App\Http\Controllers\User\Flexiload;
+
+use Illuminate\Http\Request;
+use App\Http\Controllers\Controller;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+
+class OfferController extends Controller
+{
+    /** UI operator value => [endpoint, api operator code] */
+    private array $operatorMap = [
+        'grameen'    => ['powerload', 'grameen'],
+        'gp'         => ['powerload', 'grameen'],
+        'rb'         => ['offer', 'rb'],
+        'robi'       => ['offer', 'rb'],
+        'at'         => ['offer', 'at'],
+        'airtel'     => ['offer', 'at'],
+        'bl'         => ['offer', 'bl'],
+        'banglalink' => ['offer', 'bl'],
+    ];
+
+    private array $operatorChoices = [
+        'grameen'  => 'Grameenphone',
+        'rb'       => 'Robi',
+        'at'       => 'Airtel',
+        'bl'       => 'Banglalink',
+        'teletalk' => 'Teletalk',
+    ];
+
+    private array $categoryLabels = [
+        'all'       => 'All Offers',
+        '30days'    => '30 Days',
+        '7days'     => '7 Days',
+        'data'      => 'Data',
+        'minutes'   => 'Minutes',
+        'combo'     => 'Combo',
+        'social'    => 'Social',
+        'streaming' => 'Streaming',
+        'unlimited' => 'Unlimited',
+    ];
+
+    /** Show the empty form. */
+    public function offerForm()
+    {
+        return view('user.flexiload.offer-check', [
+            'operators'  => $this->operatorChoices,
+            'categories' => $this->categoryLabels,
+            'form'       => ['operator' => 'bl', 'number' => '', 'amount' => '10'],
+            'result'     => null,
+            'error'      => null,
+        ]);
+    }
+
+    /** Handle the form submit and fetch offers. */
+    public function checkOffer(Request $request)
+    {
+        $form = [
+            'operator' => trim((string) $request->input('operator')),
+            'number'   => trim((string) $request->input('number')),
+            'amount'   => trim((string) $request->input('amount', '10')),
+        ];
+
+        $result = null;
+        $error  = null;
+
+        try {
+            $result = $this->fetchOffers($form['operator'], $form['number'], $form['amount']);
+        } catch (\Throwable $e) {
+            $error = $e->getMessage();
+        }
+
+        return view('user.flexiload.offer-check', [
+            'operators'  => $this->operatorChoices,
+            'categories' => $this->categoryLabels,
+            'form'       => $form,
+            'result'     => $result,
+            'error'      => $error,
+        ]);
+    }
+
+    /** JSON endpoint (optional). */
+    public function checkOfferApi(Request $request)
+    {
+        try {
+            $result = $this->fetchOffers(
+                (string) $request->input('operator'),
+                (string) $request->input('number'),
+                $request->input('amount', 10)
+            );
+        } catch (\Throwable $e) {
+            return response()->json(['error' => $e->getMessage()], 400);
+        }
+
+        return response()->json([
+            'operator' => $request->input('operator'),
+            'number'   => $request->input('number'),
+            'amount'   => $request->input('amount'),
+            'count'    => $result['counts']['all'],
+            'offers'   => $result['offers'],
+        ]);
+    }
+
+    /**
+     * BUY: do NOT duplicate your load logic. Reshape the request into what your
+     * existing LoadController@flexiloadFormProcess expects, then hand it off.
+     * Your single-load flow stays the only place that writes LoadCamPending,
+     * debits balance, etc.
+     */
+    public function buyOfferProcess(Request $request)
+    {
+        $request->validate([
+            'offer_amount'    => 'required|integer|min:10|max:50000',
+            'number_type'     => 'required',
+            'targeted_number' => 'required',
+            'flexipin'        => 'required',
+            'operator'        => 'required',
+        ]);
+
+        // Map offer-check operator (grameen/rb/at/bl) -> load operator string.
+        $alias = [
+            'grameen' => 'gp',     'gp'    => 'gp',
+            'rb'      => 'robi',   'robi'  => 'robi',
+            'at'      => 'airtel', 'airtel' => 'airtel',
+            'bl'      => 'blink',  'blink' => 'blink',
+            'teletalk' => 'teletalk',
+        ];
+        $operator = $alias[strtolower($request->operator)] ?? $request->operator;
+
+        $request->merge([
+            'amount'              => (int) $request->offer_amount,
+            'operator'            => $operator,
+            'dynamic_name_column' => $request->owner_name ?? '',
+        ]);
+
+        // Hand off to your EXISTING single-load controller method.
+        return app(\App\Http\Controllers\User\Flexiload\LoadController::class)
+            ->flexiloadFormProcess($request);
+    }
+
+    // ----------------------------------------------------------------------
+    //  Offer API call + normalization (self-contained, nothing external)
+    // ----------------------------------------------------------------------
+
+    /**
+     * @throws \InvalidArgumentException on bad input
+     * @throws \RuntimeException on API/network problems
+     */
+    private function fetchOffers(string $uiOperator, string $number, $amount): array
+    {
+        $uiOperator = strtolower(trim($uiOperator));
+        $number     = trim($number);
+
+        if (!preg_match('/^(?:\+?88)?01[3-9]\d{8}$/', $number)) {
+            throw new \InvalidArgumentException('Enter a valid Bangladesh mobile number.');
+        }
+
+        $amount = (int) $amount;
+        if ($amount <= 0) {
+            throw new \InvalidArgumentException('Enter a valid amount.');
+        }
+
+        if (!isset($this->operatorMap[$uiOperator])) {
+            throw new \InvalidArgumentException('Offer check is not supported for this operator.');
+        }
+
+        [$endpoint, $apiOperator] = $this->operatorMap[$uiOperator];
+
+        $cfg   = config('services.offer_api');
+        $query = [
+            'user_id'  => $cfg['user_id'],
+            'password' => $cfg['password'],
+            'number'   => $number,
+            'amount'   => $amount,
+            'refer_id' => $cfg['refer_id'],
+            'operator' => $apiOperator,
+        ];
+        if ($endpoint === 'powerload') {
+            $query['type'] = 'offer';
+        }
+
+        $url = rtrim($cfg['base_url'], '/') . '/api/' . $endpoint;
+
+        try {
+            $response = Http::timeout($cfg['timeout'])
+                ->acceptJson()
+                ->withHeaders(['User-Agent' => 'Flexiload-Laravel/1.0'])
+                ->get($url, $query);
+        } catch (\Throwable $e) {
+            Log::error('Offer API request failed for ' . $apiOperator . ': ' . $e->getMessage());
+            throw new \RuntimeException('Offer API request failed or timed out. Please try again.');
+        }
+
+        if ($response->failed()) {
+            Log::error('Offer API HTTP ' . $response->status() . ' for ' . $apiOperator . ': ' . substr($response->body(), 0, 300));
+            throw new \RuntimeException('Offer API error (' . $response->status() . '). Please try again.');
+        }
+
+        $apiResponse = $response->json();
+        if ($apiResponse === null) {
+            throw new \RuntimeException('Offer API returned an unreadable response.');
+        }
+
+        $rawOffers = $this->extractOffers($apiResponse);
+        $offers    = [];
+        foreach ($rawOffers as $raw) {
+            $n = $this->normalizeOffer($uiOperator, $raw);
+            if ($n !== null) {
+                $offers[] = $n;
+            }
+        }
+
+        $counts = array_fill_keys(array_keys($this->categoryLabels), 0);
+        $counts['all'] = count($offers);
+        foreach ($offers as $offer) {
+            foreach ($offer['cat'] as $key => $isOn) {
+                if ($isOn) {
+                    $counts[$key]++;
+                }
+            }
+        }
+
+        $filters = [];
+        foreach ($this->categoryLabels as $key => $label) {
+            $filters[] = ['key' => $key, 'label' => $label, 'count' => $counts[$key] ?? 0];
+        }
+
+        $message = is_array($apiResponse) ? ($apiResponse['message'] ?? '') : '';
+
+        Log::info("Offer check operator={$apiOperator} number=" . substr($number, 0, 5) . '*** amount=' . $amount . ' offers=' . count($offers));
+
+        return [
+            'offers'     => $offers,
+            'counts'     => $counts,
+            'filters'    => $filters,
+            'message'    => $message,
+            'uiOperator' => $uiOperator,
+        ];
+    }
+
+    private function extractOffers($apiResponse): array
+    {
+        if (is_array($apiResponse) && array_is_list($apiResponse)) {
+            return $apiResponse;
+        }
+        foreach (['offers', 'data', 'offerList', 'list', 'result', 'offersList'] as $key) {
+            if (isset($apiResponse[$key]) && is_array($apiResponse[$key])) {
+                return $apiResponse[$key];
+            }
+        }
+        return [];
+    }
+
+    private function first(array $map, array $keys, $default = '')
+    {
+        foreach ($keys as $key) {
+            if (isset($map[$key]) && $map[$key] !== '' && $map[$key] !== null) {
+                return $map[$key];
+            }
+        }
+        return $default;
+    }
+
+    private function normalizeOffer(string $op, $offer): ?array
+    {
+        if (!is_array($offer)) {
+            return null;
+        }
+
+        if (in_array($op, ['bl', 'banglalink'], true)) {
+            $id       = $this->first($offer, ['offerId', 'id', 'offer_id', 'packageId', 'package_id']);
+            $amount   = $this->first($offer, ['amount', 'price', 'offerPrice', 'offer_price', 'packagePrice', 'package_price'], '0');
+            $summary  = $this->first($offer, ['offerSummary', 'summary', 'offerDescription', 'description', 'name', 'packageName', 'package_name'], 'Banglalink Offer');
+            $validity = $this->first($offer, ['validity', 'offerValidity', 'validityHours', 'offerValidityHours', 'duration', 'validity_days'], 'N/A');
+            $ussd     = $this->first($offer, ['ussdCode', 'ussd', 'optInKeyword', 'code', 'ussdString', 'ussd_code']);
+            $type     = $this->first($offer, ['offerType', 'type', 'offerContentType', 'category', 'offer_type'], 'Offer');
+        } elseif (in_array($op, ['rb', 'robi', 'at', 'airtel'], true)) {
+            $id       = $this->first($offer, ['ticketId', 'offerId']);
+            $amount   = $this->first($offer, ['amount'], 0);
+            $summary  = $this->first($offer, ['subscriberOfferMessage', 'offerSummary'], ($op === 'rb' || $op === 'robi') ? 'Robi Offer' : 'Airtel Offer');
+            $validity = $this->first($offer, ['validity'], 'N/A');
+            $ussd     = $this->first($offer, ['ussdCode']);
+            $type     = $this->first($offer, ['offerType'], 'Offer');
+        } elseif (in_array($op, ['grameen', 'gp', 'grameenphone'], true)) {
+            $id            = $this->first($offer, ['offerId']);
+            $amount        = $this->first($offer, ['offerPrice'], '0');
+            $summary       = $this->first($offer, ['offerDescription'], 'N/A');
+            $validityHours = $this->first($offer, ['offerValidityHours'], '');
+            $validity      = $validityHours !== '' ? ($validityHours . 'H') : 'N/A';
+            $ussd          = $this->first($offer, ['optInKeyword']);
+            $type          = $this->first($offer, ['offerContentType'], '');
+        } else {
+            $id       = $this->first($offer, ['offerId']);
+            $amount   = $this->first($offer, ['amount'], '0');
+            $summary  = $this->first($offer, ['offerSummary'], 'N/A');
+            $validity = $this->first($offer, ['validity'], 'N/A');
+            $ussd     = $this->first($offer, ['ussdCode']);
+            $type     = $this->first($offer, ['offerType'], '');
+        }
+
+        $summary = $this->cleanSummary($summary);
+
+        $amountNum = is_numeric($amount) ? (float) $amount : 0;
+        if ($amountNum == (int) $amountNum) {
+            $amountNum = (int) $amountNum;
+        }
+
+        if ($validity === '' || $validity === 'N/A') {
+            if (preg_match('/(\d+)\s*(day|days|hour|hours)/i', $summary, $m)) {
+                $n    = (int) $m[1];
+                $unit = stripos($m[2], 'day') === 0 ? 'Day' : 'Hour';
+                $validity = $n . ' ' . $unit . ($n > 1 ? 's' : '');
+            }
+        }
+
+        return [
+            'id'       => (string) $id,
+            'amount'   => $amountNum,
+            'summary'  => $summary,
+            'validity' => $validity,
+            'ussd'     => (string) $ussd,
+            'type'     => (string) $type,
+            'cat'      => $this->categories($summary, $validity),
+        ];
+    }
+
+    private function cleanSummary($summary): string
+    {
+        $summary = preg_replace('/C-\S*/', '', (string) $summary);
+        $summary = trim($summary);
+        if (strpos($summary, '|') !== false) {
+            $summary = trim(explode('|', $summary, 2)[0]);
+        }
+        return $summary !== '' ? $summary : 'Special Offer';
+    }
+
+    private function categories(string $summary, $validity): array
+    {
+        $s = strtolower($summary);
+        $v = strtolower((string) $validity);
+
+        $cat = [
+            '30days' => (str_contains($s, '30 day') || str_contains($s, '30days') || str_contains($s, '30d') || str_contains($v, '30')),
+            '7days'  => (str_contains($s, '7 day') || str_contains($s, '7days') || str_contains($s, '7d') || str_contains($v, '7')),
+            'data'   => (str_contains($s, 'gb') || str_contains($s, 'data') || str_contains($s, 'internet') || str_contains($s, 'mb')),
+            'minutes'=> (str_contains($s, 'min') || str_contains($s, 'minute') || str_contains($s, 'call') || str_contains($s, 'voice')),
+            'social' => $this->anyWord($s, ['facebook', 'whatsapp', 'messenger', 'instagram', 'imo', 'viber', 'social']),
+            'streaming' => $this->anyWord($s, ['youtube', 'tiktok', 'snapchat', 'likee', 'streaming', 'video']),
+            'unlimited' => str_contains($s, 'unlimited'),
+        ];
+        $cat['combo'] = ($cat['data'] && $cat['minutes']) || str_contains($s, 'combo') || str_contains($s, 'both');
+        if ($cat['combo']) {
+            $cat['data'] = true;
+            $cat['minutes'] = true;
+        }
+        return $cat;
+    }
+
+    private function anyWord(string $haystack, array $words): bool
+    {
+        foreach ($words as $w) {
+            if (str_contains($haystack, $w)) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+
+===============================================================================
+ 2) ROUTES  (add to routes/web.php, inside your authenticated user group)
+===============================================================================
+
+use App\Http\Controllers\User\Flexiload\OfferController;
+
+Route::get('offer',            [OfferController::class, 'offerForm'])->name('user.offer.form');
+Route::post('offer-check',     [OfferController::class, 'checkOffer'])->name('user.offer.check');
+Route::post('offer-buy',       [OfferController::class, 'buyOfferProcess'])->name('user.offer.buy');
+Route::post('offer-check-api', [OfferController::class, 'checkOfferApi'])->name('user.offer.check.api'); // optional JSON
+
+
+===============================================================================
+ 3) .env  (add these keys)
+===============================================================================
+
+OFFER_API_BASE_URL=http://YOUR_SERVER_IP:8080
+OFFER_API_USER_ID=YOUR_USER_ID
+OFFER_API_PASSWORD=YOUR_PASSWORD
+OFFER_API_REFER_ID=YOUR_REFER_ID
+OFFER_API_TIMEOUT=30
+
+
+===============================================================================
+ 4) config/services.php  (add this block inside the returned array)
+===============================================================================
+
+'offer_api' => [
+    'base_url'  => env('OFFER_API_BASE_URL', 'http://YOUR_SERVER_IP:8080'),
+    'user_id'   => env('OFFER_API_USER_ID', 'YOUR_USER_ID'),
+    'password'  => env('OFFER_API_PASSWORD', 'YOUR_PASSWORD'),
+    'refer_id'  => env('OFFER_API_REFER_ID', 'YOUR_REFER_ID'),
+    'timeout'   => (int) env('OFFER_API_TIMEOUT', 30),
+],
+
+
+===============================================================================
+ BLADE
+===============================================================================
+
+Your existing blade (resources/views/user/flexiload/offer-check.blade.php) works
+as-is. It posts the form to offer-check and the Buy modal to offer-buy, which now
+point at OfferController above. You do NOT need to change the blade.
+
+
+===============================================================================
+ IF "CHECK OFFER" ERRORS — RUN THIS ON THE LARAVEL SERVER (not your PC)
+===============================================================================
+
+# try 8080 first:
+curl "http://YOUR_SERVER_IP:8080/api/offer?user_id=YOUR_USER_ID&password=YOUR_PASSWORD&number=01XXXXXXXXX&amount=19&refer_id=YOUR_REFER_ID&operator=bl"
+
+# if that fails or returns HTML, try 9090 and then set OFFER_API_BASE_URL to it:
+curl "http://YOUR_SERVER_IP:9090/api/offer?user_id=YOUR_USER_ID&password=YOUR_PASSWORD&number=01XXXXXXXXX&amount=19&refer_id=YOUR_REFER_ID&operator=bl"
+
+Whichever returns JSON is the correct OFFER_API_BASE_URL. Also check
+storage/logs/laravel.log for the exact "Offer API ..." line (status + response).
+After editing .env run:  php artisan config:clear

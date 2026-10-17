@@ -1,0 +1,43 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Overview | Flexiload Control{% endblock %}
+{% block heading %}Operations overview{% endblock %}
+{% block header_action %}
+  <a class="btn primary" href="{% url 'dashboard:topup' %}">New top-up</a>
+{% endblock %}
+{% block content %}
+  <div class="mode-banner {% if modem_backend == 'serial' %}live{% else %}mock{% endif %}">
+    <strong>{{ modem_backend|upper }} MODE</strong>
+    {% if modem_backend == "serial" %}Real USSD commands are enabled.{% else %}No real USSD commands are dialed.{% endif %}
+  </div>
+  <section class="stats-grid">
+    <article class="stat-card"><span>Active SIMs</span><strong>{{ profile_count }}</strong></article>
+    <article class="stat-card"><span>Verified SIMs</span><strong>{{ verified_count }}</strong></article>
+    <article class="stat-card"><span>Transactions</span><strong>{{ transaction_count }}</strong></article>
+    <article class="stat-card"><span>Successful volume</span><strong>BDT {{ total_amount }}</strong></article>
+  </section>
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Recent transactions</h2>
+      <a href="{% url 'dashboard:transactions' %}">View all</a>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Source SIM</th><th>Destination</th><th>Product</th><th>Amount</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for item in recent_transactions %}
+            <tr>
+              <td><a href="{% url 'dashboard:transaction_detail' item.pk %}">{{ item.created_at|date:"Y-m-d H:i:s" }}</a></td>
+              <td>{{ item.sim_profile.sim_number|default:item.sim_profile.name }}</td>
+              <td>{{ item.phone_number }}</td>
+              <td>{{ item.get_product_display }}</td>
+              <td>BDT {{ item.amount }}</td>
+              <td><span class="badge {{ item.status }}">{{ item.get_status_display }}</span></td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="6" class="empty">No transactions yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}
